@@ -57,6 +57,10 @@ void video_renderer_stop ();
 /* TRUE once if the user closed the video window; clears itself when read, so
    the caller can treat it as the end of a session rather than a shutdown. */
 bool video_renderer_take_window_closed ();
+
+/* Called with the key name for each key pressed in the video window, as
+   reported by the videosink through GstNavigation. */
+void video_renderer_set_key_handler (void (*handler)(const char *key));
 void video_renderer_set_device_model(const char *model, const char *name);
 void video_renderer_set_track_metadata(const char *title, const char *artist, const char *album);
 void video_renderer_pause ();

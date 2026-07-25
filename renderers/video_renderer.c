@@ -26,8 +26,10 @@
 
 #define SECOND_IN_NSECS 1000000000UL
 #define SECOND_IN_MICROSECS 1000000
-#ifdef X_DISPLAY_FIX
+/* Keys reach us through navigation messages on every platform, not only the
+   X11 build, so this cannot live behind X_DISPLAY_FIX. */
 #include <gst/video/navigation.h>
+#ifdef X_DISPLAY_FIX
 #include "x_display_fix.h"
 static bool fullscreen = false;
 static bool alt_keypress = false;
@@ -41,6 +43,7 @@ static bool first_packet = false;
 static bool sync = false;
 static bool auto_videosink = true;
 static bool window_closed = false;
+static void (*key_handler)(const char *key) = NULL;
 static bool hls_video = false;
 #ifdef X_DISPLAY_FIX
 static bool use_x11 = false;
@@ -679,6 +682,10 @@ void video_renderer_hls_ready() {
     }
 }
 
+void video_renderer_set_key_handler(void (*handler)(const char *key)) {
+    key_handler = handler;
+}
+
 bool video_renderer_take_window_closed() {
     bool closed = window_closed;
     window_closed = false;
@@ -1005,18 +1012,21 @@ static gboolean gstreamer_video_pipeline_bus_callback(GstBus *bus, GstMessage *m
             }
         }
         break;
+    case GST_MESSAGE_ELEMENT: {
+        /* Not guarded by X_DISPLAY_FIX: keys from the videosink are the only
+           way the video window can drive anything, and that matters on every
+           platform, not just the X11 build. */
+        GstNavigationMessageType message_type = gst_navigation_message_get_type (message);
+        if (message_type == GST_NAVIGATION_MESSAGE_EVENT) {
+            GstEvent *event = NULL;
+            if (gst_navigation_message_parse_event (message, &event)) {
+                GstNavigationEventType event_type = gst_navigation_event_get_type (event);
+                const gchar *key = NULL;
+                switch (event_type) {
+                case GST_NAVIGATION_EVENT_KEY_PRESS:
+                    if (gst_navigation_event_parse_key_event (event, &key)) {
 #ifdef  X_DISPLAY_FIX
-    case GST_MESSAGE_ELEMENT:
-        if (renderer->gst_window && renderer->gst_window->window) {
-            GstNavigationMessageType message_type = gst_navigation_message_get_type (message);
-            if (message_type == GST_NAVIGATION_MESSAGE_EVENT) {
-                GstEvent *event = NULL;
-                if (gst_navigation_message_parse_event (message, &event)) {
-                    GstNavigationEventType event_type = gst_navigation_event_get_type (event);
-                    const gchar *key = NULL;
-                    switch (event_type) {
-                    case GST_NAVIGATION_EVENT_KEY_PRESS:
-                        if (gst_navigation_event_parse_key_event (event, &key)) {
+                        if (renderer->gst_window && renderer->gst_window->window) {
                             if ((strcmp (key, "F11") == 0) || (alt_keypress && strcmp (key, "Return") == 0)) {
                                 fullscreen = !(fullscreen);
                                 set_fullscreen(renderer->gst_window, &fullscreen);
@@ -1024,24 +1034,32 @@ static gboolean gstreamer_video_pipeline_bus_callback(GstBus *bus, GstMessage *m
                                 alt_keypress = true;
                             }
                         }
-                        break;
-                    case GST_NAVIGATION_EVENT_KEY_RELEASE:
-                        if (gst_navigation_event_parse_key_event (event, &key)) {
-                            if (strcmp (key, "Alt_L") == 0) {
-                                alt_keypress = false;
-                            }
+#endif
+                        if (key_handler) {
+                            key_handler (key);
                         }
-                    default:
-                        break;
                     }
+                    break;
+                case GST_NAVIGATION_EVENT_KEY_RELEASE:
+#ifdef  X_DISPLAY_FIX
+                    if (renderer->gst_window && renderer->gst_window->window &&
+                        gst_navigation_event_parse_key_event (event, &key)) {
+                        if (strcmp (key, "Alt_L") == 0) {
+                            alt_keypress = false;
+                        }
+                    }
+#endif
+                    break;
+                default:
+                    break;
                 }
-                if (event) {
-                    gst_event_unref (event);
-                }
+            }
+            if (event) {
+                gst_event_unref (event);
             }
         }
         break;
-#endif
+    }
     default:
       /* unhandled message */
         break;

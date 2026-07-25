@@ -121,6 +121,10 @@ static void statusbar_update(statusbar_state_t state) {
    does, so dragging it lands where the client's own slider would. */
 static void statusbar_volume_changed(double fraction);
 static void statusbar_disconnect_requested(void);
+static void video_window_key_pressed(const char *key);
+/* Last known position of the AirPlay volume slider, so the arrow keys have
+   something to step from. */
+static double volume_fraction = 1.0;
 #else
 #define statusbar_update(state) ((void) 0)
 #endif
@@ -700,6 +704,7 @@ static void statusbar_volume_changed(double fraction) {
     if (!use_audio) {
         return;
     }
+    volume_fraction = fraction;
     if (fraction <= 0.0) {
         gst_volume = 0.0;
     } else {
@@ -712,6 +717,30 @@ static void statusbar_volume_changed(double fraction) {
     }
     audio_renderer_set_volume(gst_volume);
     video_renderer_hls_set_volume(gst_volume);
+}
+
+/* The arrow keys step by 1/16, which is the granularity of the AirPlay volume
+   control itself, so the two stay on the same notches. */
+static void video_window_key_pressed(const char *key) {
+    double step;
+
+    if (!key || !use_audio) {
+        return;
+    }
+    if (!strcmp(key, "Up")) {
+        step = 1.0 / 16.0;
+    } else if (!strcmp(key, "Down")) {
+        step = -1.0 / 16.0;
+    } else {
+        return;
+    }
+
+    double target = volume_fraction + step;
+    target = (target > 1.0) ? 1.0 : target;
+    target = (target < 0.0) ? 0.0 : target;
+
+    statusbar_volume_changed(target);
+    statusbar_set_volume(target);
 }
 
 static void statusbar_disconnect_requested(void) {
@@ -2487,6 +2516,7 @@ extern "C" void audio_set_volume (void *cls, float volume) {
     }
 
 #ifdef __APPLE__
+    volume_fraction = frac;
     statusbar_set_volume(frac);
 #endif
     /* frac is length of volume slider as fraction of max length */
@@ -3311,6 +3341,9 @@ int main (int argc, char *argv[]) {
     statusbar_init();
     statusbar_set_volume_handler(statusbar_volume_changed);
     statusbar_set_disconnect_handler(statusbar_disconnect_requested);
+    if (use_video) {
+        video_renderer_set_key_handler(video_window_key_pressed);
+    }
 #endif
 
     reconnect:

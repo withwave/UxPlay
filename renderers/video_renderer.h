@@ -61,6 +61,15 @@ bool video_renderer_take_window_closed ();
 /* Called with the key name for each key pressed in the video window, as
    reported by the videosink through GstNavigation. */
 void video_renderer_set_key_handler (void (*handler)(const char *key));
+
+/* Flash a volume readout over the video, if the videosink can show one.
+   Level is 0.0 - 1.0. Ignored by sinks without the feature. */
+void video_renderer_show_volume (double level);
+
+/* Tell the videosink a session has ended. The pipeline is not always taken
+   down when a client leaves (see the -nc workaround), so a sink that hides its
+   window while idle cannot work this out for itself. */
+void video_renderer_set_stream_active (bool active);
 void video_renderer_set_device_model(const char *model, const char *name);
 void video_renderer_set_track_metadata(const char *title, const char *artist, const char *album);
 void video_renderer_pause ();

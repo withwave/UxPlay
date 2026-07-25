@@ -29,6 +29,8 @@
 /* Keys reach us through navigation messages on every platform, not only the
    X11 build, so this cannot live behind X_DISPLAY_FIX. */
 #include <gst/video/navigation.h>
+#include <gst/video/videooverlay.h>
+#include <stdarg.h>
 #ifdef X_DISPLAY_FIX
 #include "x_display_fix.h"
 static bool fullscreen = false;
@@ -684,6 +686,36 @@ void video_renderer_hls_ready() {
 
 void video_renderer_set_key_handler(void (*handler)(const char *key)) {
     key_handler = handler;
+}
+
+static void video_renderer_set_sink_property(const char *name, ...) {
+    GstElement *sink;
+    va_list args;
+
+    if (!renderer || !renderer->pipeline) {
+        return;
+    }
+    /* Only the patched osxvideosink carries these; any other sink simply has
+       no such property and is left alone. */
+    sink = gst_bin_get_by_interface(GST_BIN(renderer->pipeline),
+                                    GST_TYPE_VIDEO_OVERLAY);
+    if (!sink) {
+        return;
+    }
+    if (g_object_class_find_property(G_OBJECT_GET_CLASS(sink), name)) {
+        va_start(args, name);
+        g_object_set_valist(G_OBJECT(sink), name, args);
+        va_end(args);
+    }
+    gst_object_unref(sink);
+}
+
+void video_renderer_set_stream_active(bool active) {
+    video_renderer_set_sink_property("stream-active", (gboolean) active, NULL);
+}
+
+void video_renderer_show_volume(double level) {
+    video_renderer_set_sink_property("volume-osd", level, NULL);
 }
 
 bool video_renderer_take_window_closed() {

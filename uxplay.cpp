@@ -724,7 +724,16 @@ static void statusbar_volume_changed(double fraction) {
 static void video_window_key_pressed(const char *key) {
     double step;
 
-    if (!key || !use_audio) {
+    if (!key) {
+        return;
+    }
+    /* Synthesised by the close button drawn over the video, which has no other
+       way to reach us. */
+    if (!strcmp(key, "uxplay-disconnect")) {
+        statusbar_disconnect_requested();
+        return;
+    }
+    if (!use_audio) {
         return;
     }
     if (!strcmp(key, "Up")) {
@@ -741,6 +750,7 @@ static void video_window_key_pressed(const char *key) {
 
     statusbar_volume_changed(target);
     statusbar_set_volume(target);
+    video_renderer_show_volume(target);
 }
 
 static void statusbar_disconnect_requested(void) {
@@ -2324,6 +2334,9 @@ extern "C" void conn_destroy (void *cls) {
 #ifdef __APPLE__
         statusbar_set_client(NULL, NULL);
 #endif
+        if (use_video) {
+            video_renderer_set_stream_active(false);
+        }
         remote_clock_offset = 0;
         if (use_audio) {
             audio_renderer_stop();

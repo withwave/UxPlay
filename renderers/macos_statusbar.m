@@ -11,6 +11,13 @@
 static NSStatusItem *status_item = nil;
 static NSMenuItem *client_item = nil;
 static NSMenuItem *state_item = nil;
+static NSMenuItem *track_item = nil;
+static NSMenuItem *disconnect_item = nil;
+static NSSlider *volume_slider = nil;
+
+static NSString *track_text = nil;
+static void (*volume_handler)(double) = NULL;
+static void (*disconnect_handler)(void) = NULL;
 
 static statusbar_state_t current_state = STATUSBAR_IDLE;
 static NSString *client_name = nil;
@@ -30,6 +37,8 @@ run_on_main (dispatch_block_t block)
 
 @interface UxPlayStatusTarget : NSObject
 - (void) quit: (id) sender;
+- (void) disconnect: (id) sender;
+- (void) volumeChanged: (id) sender;
 @end
 
 @implementation UxPlayStatusTarget
@@ -37,6 +46,20 @@ run_on_main (dispatch_block_t block)
 {
     /* Same path as Ctrl-C, so the server is torn down cleanly. */
     kill (getpid (), SIGINT);
+}
+
+- (void) disconnect: (id) sender
+{
+    if (disconnect_handler != NULL) {
+        disconnect_handler ();
+    }
+}
+
+- (void) volumeChanged: (id) sender
+{
+    if (volume_handler != NULL) {
+        volume_handler ([(NSSlider *) sender doubleValue]);
+    }
 }
 @end
 
@@ -122,6 +145,12 @@ refresh (void)
     [client_item setTitle: client_name.length ? client_name : @"No client"];
     [client_item setHidden: !connected];
     [state_item setTitle: state_text];
+
+    [track_item setHidden: !(connected && track_text.length)];
+    if (connected && track_text.length) {
+        [track_item setTitle: track_text];
+    }
+    [disconnect_item setEnabled: connected];
 }
 
 void
@@ -145,7 +174,45 @@ statusbar_init (void)
                                      action: nil keyEquivalent: @""];
         [state_item setEnabled: NO];
 
+        track_item = [menu addItemWithTitle: @"" action: nil keyEquivalent: @""];
+        [track_item setEnabled: NO];
+        [track_item setHidden: YES];
+
         [menu addItem: [NSMenuItem separatorItem]];
+
+        /* A slider needs a view of its own; a plain menu item cannot hold one. */
+        {
+            NSView *row = [[[NSView alloc] initWithFrame:
+                NSMakeRect (0, 0, 220, 32)] autorelease];
+            NSTextField *label = [NSTextField labelWithString: @"Volume"];
+
+            [label setFrame: NSMakeRect (14, 7, 56, 18)];
+            [label setFont: [NSFont menuFontOfSize: 0]];
+            [row addSubview: label];
+
+            volume_slider = [[NSSlider alloc] initWithFrame:
+                NSMakeRect (74, 6, 132, 20)];
+            [volume_slider setMinValue: 0.0];
+            [volume_slider setMaxValue: 1.0];
+            [volume_slider setDoubleValue: 1.0];
+            [volume_slider setTarget: target];
+            [volume_slider setAction: @selector(volumeChanged:)];
+            [volume_slider setContinuous: YES];
+            [row addSubview: volume_slider];
+
+            NSMenuItem *volume_item = [menu addItemWithTitle: @""
+                                                      action: nil
+                                               keyEquivalent: @""];
+            [volume_item setView: row];
+        }
+
+        [menu addItem: [NSMenuItem separatorItem]];
+
+        disconnect_item = [menu addItemWithTitle: @"Disconnect"
+                                          action: @selector(disconnect:)
+                                   keyEquivalent: @""];
+        [disconnect_item setTarget: target];
+        [disconnect_item setEnabled: NO];
         [[menu addItemWithTitle: @"Quit UxPlay"
                          action: @selector(quit:)
                   keyEquivalent: @"q"] setTarget: target];
@@ -182,6 +249,64 @@ statusbar_set_state (statusbar_state_t state)
     });
 }
 
+/* Menu items get unreadable long before they get wide enough to hold a full
+   track name, so clip with an ellipsis. */
+static NSString *
+elide (NSString *text, NSUInteger limit)
+{
+    if ([text length] <= limit) {
+        return text;
+    }
+    return [[text substringToIndex: limit] stringByAppendingString: @"\U00002026"];
+}
+
+void
+statusbar_set_metadata (const char *title, const char *artist)
+{
+    NSString *t = title ? [NSString stringWithUTF8String: title] : nil;
+    NSString *a = artist ? [NSString stringWithUTF8String: artist] : nil;
+
+    run_on_main (^{
+        NSString *combined = nil;
+
+        if (t.length && a.length) {
+            combined = [NSString stringWithFormat: @"%@ \U00002014 %@", a, t];
+        } else if (t.length) {
+            combined = t;
+        } else if (a.length) {
+            combined = a;
+        }
+
+        [track_text release];
+        track_text = combined.length ?
+            [[NSString stringWithFormat: @"\U0000266A %@",
+                elide (combined, 44)] retain] : nil;
+        refresh ();
+    });
+}
+
+void
+statusbar_set_volume (double fraction)
+{
+    run_on_main (^{
+        if (volume_slider != nil) {
+            [volume_slider setDoubleValue: fraction];
+        }
+    });
+}
+
+void
+statusbar_set_volume_handler (void (*handler)(double fraction))
+{
+    volume_handler = handler;
+}
+
+void
+statusbar_set_disconnect_handler (void (*handler)(void))
+{
+    disconnect_handler = handler;
+}
+
 void
 statusbar_destroy (void)
 {
@@ -193,6 +318,12 @@ statusbar_destroy (void)
         }
         client_item = nil;
         state_item = nil;
+        track_item = nil;
+        disconnect_item = nil;
+        [volume_slider release];
+        volume_slider = nil;
+        [track_text release];
+        track_text = nil;
         [target release];
         target = nil;
         [client_name release];

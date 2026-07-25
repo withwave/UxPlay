@@ -115,6 +115,12 @@ static void statusbar_update(statusbar_state_t state) {
         statusbar_set_state(state);
     }
 }
+
+/* The slider carries the same 0.0 - 1.0 fraction the AirPlay volume control
+   uses, rescaled to GStreamer's linear scale the same way audio_set_volume()
+   does, so dragging it lands where the client's own slider would. */
+static void statusbar_volume_changed(double fraction);
+static void statusbar_disconnect_requested(void);
 #else
 #define statusbar_update(state) ((void) 0)
 #endif
@@ -173,6 +179,12 @@ static unsigned short airplay_port;
 static uint64_t remote_clock_offset = 0;
 static std::vector<std::string> allowed_clients;
 static std::vector<std::string> blocked_clients;
+/* A client whose session was just ended from the menu bar. iOS re-offers the
+   connection immediately if mirroring is still switched on at its end, so
+   without a short refusal window "Disconnect" looks like it did nothing. */
+static std::string current_deviceid;
+static std::string disconnected_deviceid;
+static time_t disconnected_until = 0;
 static bool restrict_clients;
 static bool setup_legacy_pairing = false;
 static unsigned char pin_pw = 0;  /* 0: no client access control; 1: onscreen pin ; 2: require password (same password for all clients)  3: random pw*/
@@ -681,6 +693,41 @@ static gboolean video_eos_watch_callback (gpointer loop) {
 
 #define MAX_VIDEO_RENDERERS 3
 #define MAX_AUDIO_RENDERERS 2
+#ifdef __APPLE__
+static void statusbar_volume_changed(double fraction) {
+    double db, gst_volume;
+
+    if (!use_audio) {
+        return;
+    }
+    if (fraction <= 0.0) {
+        gst_volume = 0.0;
+    } else {
+        db = db_low + (db_high - db_low) * fraction;
+        if (taper_volume) {
+            double tapered = db_high + 10.0 * (log10(fraction) / log10(2.0));
+            db = (tapered > db) ? tapered : db;
+        }
+        gst_volume = pow(10.0, 0.05 * db);
+    }
+    audio_renderer_set_volume(gst_volume);
+    video_renderer_hls_set_volume(gst_volume);
+}
+
+static void statusbar_disconnect_requested(void) {
+    /* Same shape as closing the video window: end the session, keep serving. */
+    LOGI("Disconnect requested from the menu bar");
+    disconnected_deviceid = current_deviceid;
+    disconnected_until = time(NULL) + 8;
+    reset_httpd = true;
+    full_video_reset = true;
+    relaunch_video = true;
+    /* Quitting the loop is left to reset_callback(), which runs on the loop's
+       own thread; this handler is called from the AppKit main thread. */
+    reset_loop = true;
+}
+#endif
+
 static void main_loop()  {
     guint gst_video_bus_watch_id[MAX_VIDEO_RENDERERS] = { 0 };
     guint gst_audio_bus_watch_id[MAX_AUDIO_RENDERERS] = { 0 };
@@ -2288,6 +2335,12 @@ extern "C" void conn_reset (void *cls, int reason) {
 
 extern "C" void report_client_request(void *cls, char *deviceid, char * model, char *name, bool * admit) {
     LOGI("connection request from %s (%s) with deviceID = %s\n", name, model, deviceid);
+    current_deviceid = deviceid;
+    if (disconnected_deviceid == deviceid && time(NULL) < disconnected_until) {
+        LOGI("client was disconnected from the menu bar: refusing until it stops offering");
+        *admit = false;
+        return;
+    }
 #ifdef __APPLE__
     statusbar_set_client(name, model);
 #endif
@@ -2433,6 +2486,9 @@ extern "C" void audio_set_volume (void *cls, float volume) {
         frac = (frac > 1.0) ? 1.0 : frac;
     }
 
+#ifdef __APPLE__
+    statusbar_set_volume(frac);
+#endif
     /* frac is length of volume slider as fraction of max length */
     /* also (steps/16) where steps is number of discrete steps above mute (16 = full volume) */
     if (frac == 0.0) {
@@ -2565,6 +2621,10 @@ extern "C" void audio_set_metadata(void *cls, const void *buffer, int buflen) {
     if (buflen != 0) {
         LOGE("%d bytes of metadata were not processed", buflen);
     }
+#ifdef __APPLE__
+    statusbar_set_metadata(track_title.length() ? track_title.c_str() : NULL,
+                           artist.length() ? artist.c_str() : NULL);
+#endif
     // Update video renderer with track metadata for cover art display
     if (render_coverart) {
         video_renderer_set_track_metadata(
@@ -3249,6 +3309,8 @@ int main (int argc, char *argv[]) {
     }
 #ifdef __APPLE__
     statusbar_init();
+    statusbar_set_volume_handler(statusbar_volume_changed);
+    statusbar_set_disconnect_handler(statusbar_disconnect_requested);
 #endif
 
     reconnect:

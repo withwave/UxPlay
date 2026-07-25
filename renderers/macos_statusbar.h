@@ -34,6 +34,20 @@ void statusbar_set_client(const char *name, const char *model);
 
 void statusbar_set_state(statusbar_state_t state);
 
+/* Now playing, for AirPlay Audio sessions. Either may be NULL. */
+void statusbar_set_metadata(const char *title, const char *artist);
+
+/* Position of the volume slider, 0.0 - 1.0. Call this when the client changes
+   the volume so the menu keeps up; it does not call back into UxPlay. */
+void statusbar_set_volume(double fraction);
+
+/* Invoked when the volume slider is dragged, with the same 0.0 - 1.0 scale. */
+void statusbar_set_volume_handler(void (*handler)(double fraction));
+
+/* Invoked when "Disconnect" is chosen. Expected to end the session and leave
+   the server advertising. */
+void statusbar_set_disconnect_handler(void (*handler)(void));
+
 void statusbar_destroy(void);
 
 #ifdef __cplusplus

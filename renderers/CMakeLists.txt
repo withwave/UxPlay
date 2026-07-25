@@ -45,13 +45,26 @@ pkg_check_modules(GST REQUIRED    gstreamer-1.0>=1.4
                                   gstreamer-app-1.0>=1.4
 )
 
+set( RENDERER_SOURCES
+     audio_renderer.c
+     video_renderer.c
+     mux_renderer.c )
+
+# Menu bar status item: the only place a session is visible when it is
+# AirPlay Audio, which never opens a video window.
+if( APPLE )
+  list( APPEND RENDERER_SOURCES macos_statusbar.m )
+endif()
+
 add_library( renderers
              STATIC
-             audio_renderer.c
-             video_renderer.c
-             mux_renderer.c )
+             ${RENDERER_SOURCES} )
 
 target_link_libraries ( renderers PUBLIC airplay )
+
+if( APPLE )
+  target_link_libraries ( renderers PUBLIC "-framework Cocoa" )
+endif()
 
 # hacks to fix cmake confusion due to links in path with macOS FrameWorks
 

@@ -65,6 +65,9 @@
 #include "lib/logger.h"
 #include "lib/crypto.h"
 #include "renderers/video_renderer.h"
+#ifdef __APPLE__
+#include "renderers/macos_statusbar.h"
+#endif
 #include "renderers/audio_renderer.h"
 #include "renderers/mux_renderer.h"
 #ifdef DBUS
@@ -102,6 +105,19 @@ static bool video_sync = true;
 static int64_t audio_delay_alac = 0;
 static int64_t audio_delay_aac = 0;
 static bool relaunch_video = false;
+#ifdef __APPLE__
+/* Mirrored so the AppKit call only happens when the state actually changes:
+   video_process() runs per frame. */
+static statusbar_state_t statusbar_state = STATUSBAR_IDLE;
+static void statusbar_update(statusbar_state_t state) {
+    if (state != statusbar_state) {
+        statusbar_state = state;
+        statusbar_set_state(state);
+    }
+}
+#else
+#define statusbar_update(state) ((void) 0)
+#endif
 static bool reset_loop = false;
 static unsigned int open_connections= 0;
 static std::string videosink = "autovideosink";
@@ -2217,6 +2233,9 @@ extern "C" void export_dacp(void *cls, const char *active_remote, const char *da
 extern "C" void conn_init (void *cls) {
     open_connections++;
     LOGD("Open connections: %i", open_connections);
+    /* Provisional: an AirPlay Audio session never goes further than this, a
+       mirroring one is upgraded once video frames start arriving. */
+    statusbar_update(STATUSBAR_AUDIO);
     //video_renderer_update_background(1);
 }
 
@@ -2225,6 +2244,10 @@ extern "C" void conn_destroy (void *cls) {
     open_connections--;
     LOGD("Open connections: %i", open_connections);
     if (open_connections == 0) {
+        statusbar_update(STATUSBAR_IDLE);
+#ifdef __APPLE__
+        statusbar_set_client(NULL, NULL);
+#endif
         remote_clock_offset = 0;
         if (use_audio) {
             audio_renderer_stop();
@@ -2265,6 +2288,9 @@ extern "C" void conn_reset (void *cls, int reason) {
 
 extern "C" void report_client_request(void *cls, char *deviceid, char * model, char *name, bool * admit) {
     LOGI("connection request from %s (%s) with deviceID = %s\n", name, model, deviceid);
+#ifdef __APPLE__
+    statusbar_set_client(name, model);
+#endif
     if (restrict_clients) {
         *admit = check_client(deviceid);
         if (*admit == false) {
@@ -2320,6 +2346,7 @@ extern "C" void audio_process (void *cls, raop_ntp_t *ntp, audio_decode_struct *
 }
 
 extern "C" void video_process (void *cls, raop_ntp_t *ntp, video_decode_struct *data) {
+    statusbar_update(STATUSBAR_MIRROR);
     if (dump_video) {
         dump_video_to_file(data->data, data->data_len);
     }
@@ -3220,6 +3247,10 @@ int main (int argc, char *argv[]) {
         stop_dnssd();
         cleanup();
     }
+#ifdef __APPLE__
+    statusbar_init();
+#endif
+
     reconnect:
     compression_type = 0;
     close_window = new_window_closing_behavior;
@@ -3271,6 +3302,9 @@ int main (int argc, char *argv[]) {
 }
  
 static void cleanup() {
+#ifdef __APPLE__
+    statusbar_destroy();
+#endif
     if (use_audio) {
         audio_renderer_destroy();
     }

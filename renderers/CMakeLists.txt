@@ -54,6 +54,13 @@ set( RENDERER_SOURCES
 # AirPlay Audio, which never opens a video window.
 if( APPLE )
   list( APPEND RENDERER_SOURCES macos_statusbar.m )
+  # A patched copy of GStreamer's osxvideosink, registered statically into
+  # uxplay as "uxvideosink". Built in rather than installed as a plugin so it
+  # needs no GST_PLUGIN_PATH and survives a GStreamer upgrade, and renamed so
+  # it cannot be confused with the system element it derives from.
+  list( APPEND RENDERER_SOURCES
+        uxvideosink/osxvideosink.m
+        uxvideosink/cocoawindow.m )
 endif()
 
 add_library( renderers
@@ -63,7 +70,14 @@ add_library( renderers
 target_link_libraries ( renderers PUBLIC airplay )
 
 if( APPLE )
-  target_link_libraries ( renderers PUBLIC "-framework Cocoa" )
+  target_link_libraries ( renderers PUBLIC "-framework Cocoa" "-framework OpenGL" )
+  target_include_directories ( renderers PRIVATE
+                               ${CMAKE_CURRENT_SOURCE_DIR}/uxvideosink )
+  # Makes GST_PLUGIN_DEFINE emit gst_plugin_uxvideo_register() for us to call.
+  set_source_files_properties(
+      uxvideosink/osxvideosink.m uxvideosink/cocoawindow.m
+      PROPERTIES COMPILE_OPTIONS
+      "-DGST_PLUGIN_BUILD_STATIC;-Wno-deprecated-declarations" )
 endif()
 
 # hacks to fix cmake confusion due to links in path with macOS FrameWorks

@@ -38,6 +38,11 @@ static bool alt_keypress = false;
 static unsigned char X11_search_attempts = 0;
 #endif
 
+#ifdef __APPLE__
+/* Patched videosink built into uxplay; see renderers/uxvideosink. */
+GST_PLUGIN_STATIC_DECLARE(uxvideo);
+#endif
+
 static GstClockTime gst_video_pipeline_base_time = GST_CLOCK_TIME_NONE;
 static logger_t *logger = NULL;
 static unsigned short width, height, width_source, height_source;  /* not currently used */
@@ -262,6 +267,16 @@ void video_renderer_init(logger_t *render_logger, const char *server_name, video
     GstCaps *caps = NULL;
     bool rtp = (bool) strlen(rtp_pipeline);
     hls_video = (uri != NULL);
+#ifdef __APPLE__
+    static bool uxvideo_registered = false;
+    if (!uxvideo_registered) {
+        uxvideo_registered = true;
+        if (!gst_is_initialized()) {
+            gst_init(NULL, NULL);
+        }
+        GST_PLUGIN_STATIC_REGISTER(uxvideo);
+    }
+#endif
     /* videosink choices that are auto */
     auto_videosink = (strstr(videosink, "autovideosink") || strstr(videosink, "fpsdisplaysink"));
 

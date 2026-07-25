@@ -1,2 +1,11 @@
 build/
 .vscode/
+
+# in-source cmake build
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+cmake_uninstall.cmake
+Makefile
+*.a
+/uxplay

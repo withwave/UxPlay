@@ -70,6 +70,11 @@ void video_renderer_show_volume (double level);
    down when a client leaves (see the -nc workaround), so a sink that hides its
    window while idle cannot work this out for itself. */
 void video_renderer_set_stream_active (bool active);
+
+/* The playback rate the client last commanded (0 or 1). Reported back to it
+   as-is: a receiver follows the client's intent rather than second-guessing it
+   from the pipeline, which lags behind while a seek settles. */
+void video_renderer_set_commanded_rate (float rate);
 void video_renderer_set_device_model(const char *model, const char *name);
 void video_renderer_set_track_metadata(const char *title, const char *artist, const char *album);
 void video_renderer_pause ();

@@ -52,11 +52,16 @@ static bool auto_videosink = true;
 static bool window_closed = false;
 static void (*key_handler)(const char *key) = NULL;
 static bool hls_video = false;
+/* kbit/s reported to the HLS variant chooser; see where it is applied. */
+static guint hls_connection_speed_kbps = 12000;
 #ifdef X_DISPLAY_FIX
 static bool use_x11 = false;
 #endif
 static bool logger_debug = false;
 static gint64 hls_requested_start_position = 0;
+static double hls_last_known_position = -1.0;
+static float hls_commanded_rate = 1.0f;
+static gboolean hls_paused_for_buffering = FALSE;
 static gint64 hls_seek_start = 0;
 static gint64 hls_seek_end = 0;
 static gint64 hls_duration = 0;
@@ -82,7 +87,7 @@ typedef enum {
   //GST_PLAY_FLAG_DEINTERLACE   = (1 << 9),
   //GST_PLAY_FLAG_SOFT_COLORBALANCE = (1 << 10),
   //GST_PLAY_FLAG_FORCE_FILTERS = (1 << 11),
-  //GST_PLAY_FLAG_FORCE_SW_DECODERS = (1 << 12),
+  GST_PLAY_FLAG_FORCE_SW_DECODERS = (1 << 12),
 } GstPlayFlags;
 
 #define NCODECS  3   /* renderers for h264,h265, and jpeg images */
@@ -267,6 +272,8 @@ void video_renderer_init(logger_t *render_logger, const char *server_name, video
     GstCaps *caps = NULL;
     bool rtp = (bool) strlen(rtp_pipeline);
     hls_video = (uri != NULL);
+    hls_last_known_position = -1.0;   /* per session, never carried over */
+    hls_commanded_rate = 1.0f;
 #ifdef __APPLE__
     static bool uxvideo_registered = false;
     if (!uxvideo_registered) {
@@ -357,10 +364,27 @@ void video_renderer_init(logger_t *render_logger, const char *server_name, video
                     g_object_set(G_OBJECT (renderer_type[i]->pipeline), "video-sink", playbin_videosink, NULL);
                 }
             }
+            /* The playlists are served from our own http server on localhost,
+               but the media segments come from the internet. Left to measure
+               the connection itself, the HLS demuxer times the localhost
+               transfers, concludes the link runs at over 100 Mbit/s, and picks
+               a variant the real connection cannot sustain; the segment
+               fetches then fall behind and the demuxer errors out. Declaring a
+               modest speed keeps the choice realistic. */
+            g_object_set(renderer_type[i]->pipeline, "connection-speed",
+                         (guint64) hls_connection_speed_kbps, NULL);
+
             gint flags = 0;
             g_object_get(renderer_type[i]->pipeline, "flags", &flags, NULL);
             flags |= GST_PLAY_FLAG_DOWNLOAD;
             flags |= GST_PLAY_FLAG_BUFFERING;    // set by default in playbin3, but not in playbin2; is it needed?
+            /* VideoToolbox hands playbin IOSurface-backed GL memory that the
+               sink cannot map; copying it fails and freeing it then crashes
+               inside IOSurfaceDecrementUseCount. Reproducible with any HLS
+               stream and a plain fakesink, so it is not particular to us.
+               Only this pipeline is affected: mirroring builds its own and
+               keeps hardware decoding. */
+            flags |= GST_PLAY_FLAG_FORCE_SW_DECODERS;
             g_object_set(renderer_type[i]->pipeline, "flags", flags, NULL);
             //g_object_set (G_OBJECT (renderer_type[i]->pipeline), "uri", uri, NULL);
         } else {
@@ -725,6 +749,10 @@ static void video_renderer_set_sink_property(const char *name, ...) {
     gst_object_unref(sink);
 }
 
+void video_renderer_set_commanded_rate(float rate) {
+    hls_commanded_rate = rate;
+}
+
 void video_renderer_set_stream_active(bool active) {
     video_renderer_set_sink_property("stream-active", (gboolean) active, NULL);
 }
@@ -956,10 +984,17 @@ static gboolean gstreamer_video_pipeline_bus_callback(GstBus *bus, GstMessage *m
                 hls_buffer_empty = FALSE;
                 renderer->buffering_level = percent;
                 logger_log(logger, LOGGER_DEBUG, "Buffering :%d percent done", percent);
+                /* Holding the pipeline back until the buffer has refilled,
+                   and letting it go once it has. This is what restarts
+                   playback after a seek: the seek empties the buffer, the
+                   client's own pause lands on top, and nothing else would ever
+                   move the pipeline again. */
                 if (percent < 100) {
+                    hls_paused_for_buffering = TRUE;
                     gst_element_set_state (renderer->pipeline, GST_STATE_PAUSED);
                 } else {
                     hls_buffer_full = TRUE;
+                    hls_paused_for_buffering = FALSE;
                     gst_element_set_state (renderer->pipeline, GST_STATE_PLAYING);
                 }
             }
@@ -1186,13 +1221,29 @@ bool video_get_playback_info(double *duration, double *position, double *seek_st
 
     *buffer_empty = (bool) hls_buffer_empty;
     *buffer_full = (bool) hls_buffer_full;
-    gst_element_get_state(renderer->pipeline, &state, NULL, 0);
+    /* A flushing seek drops the pipeline back to PAUSED to re-preroll, and the
+       return to PLAYING is asynchronous. Reading only the settled state during
+       that window reports the client a rate of 0, which it takes to mean
+       playback stopped -- so it stays paused until play is pressed by hand.
+       A transition already heading for PLAYING counts as playing. */
+    GstState pending = GST_STATE_VOID_PENDING;
+    GstStateChangeReturn state_ret =
+        gst_element_get_state(renderer->pipeline, &state, &pending, 0);
+    /* A seek leaves the pipeline in PAUSED while it re-prerolls; a change
+       already heading for PLAYING is reported as playing so the client is not
+       told its play command failed. */
     *rate = 0.0f;
-    switch (state) {
-    case GST_STATE_PLAYING:
+    if (state == GST_STATE_PLAYING ||
+        (state_ret == GST_STATE_CHANGE_ASYNC && pending == GST_STATE_PLAYING) ||
+        (hls_paused_for_buffering && hls_commanded_rate > 0.0f)) {
+        /* Buffering is not the same thing as stopped. A large seek empties the
+           buffer and the pipeline is held in PAUSED while it refills; calling
+           that a rate of 0 tells the client playback ended, and its transport
+           latches to stopped even though we resume moments later. A short skip
+           stays inside the buffer, never passes through here, and is why that
+           case always looked fine. The buffer_empty/full fields carry the
+           buffering state instead. */
         *rate = 1.0f;
-    default:
-        break;
     }
 
     if (!GST_CLOCK_TIME_IS_VALID(hls_duration)) {
@@ -1205,6 +1256,14 @@ bool video_get_playback_info(double *duration, double *position, double *seek_st
         if (gst_element_query_position (renderer->pipeline, GST_FORMAT_TIME, &pos) &&
                                         GST_CLOCK_TIME_IS_VALID(pos)) {
             *position = ((double) pos) / GST_SECOND;
+            hls_last_known_position = *position;
+        } else if (hls_last_known_position >= 0.0) {
+            /* The query fails while a flushing seek is still settling. Sending
+               the -1 this started as, next to a rate of 1, describes a stream
+               that is playing from nowhere; the client's playback state never
+               recovers from it, and the app stays broken until restarted.
+               Repeating the last real position keeps the report coherent. */
+            *position = hls_last_known_position;
         }
     }
 
@@ -1215,15 +1274,18 @@ bool video_get_playback_info(double *duration, double *position, double *seek_st
 }
 
 void video_renderer_set_start(float position) {
-    int pos_in_micros = (int) (position * SECOND_IN_MICROSECS);
-    hls_requested_start_position = (gint64) (pos_in_micros * GST_USECOND);
+    /* Same overflow as video_renderer_seek() had: an int of microseconds wraps
+       at 2147 seconds. */
+    hls_requested_start_position = (gint64) ((gdouble) position * GST_SECOND);
     logger_log(logger, LOGGER_DEBUG, "register HLS video start position %f %lld", position,
                hls_requested_start_position);    
 }
 
 void video_renderer_seek(float position) {
-    int pos_in_micros = (int) (position * SECOND_IN_MICROSECS);
-    gint64 seek_position = (gint64) (pos_in_micros * GST_USECOND);
+    /* Computed directly in nanoseconds: going through an int of microseconds
+       overflows at 2147 seconds, so any seek past 35:47 wrapped negative and
+       was then clamped to the start of the video. */
+    gint64 seek_position = (gint64) ((gdouble) position * GST_SECOND);
     /* don't seek to within 1  microsecond  of beginning or end of video */
     if (hls_duration < 2000) return;
     seek_position =  seek_position < 1000 ? 1000 : seek_position;
@@ -1235,7 +1297,14 @@ void video_renderer_seek(float position) {
                                               seek_position);
     if (result) {
         g_print("seek succeeded\n");
-        gst_element_set_state (renderer->pipeline, GST_STATE_PLAYING);	
+        /* The client pauses just before scrubbing and does not send a play of
+           its own afterwards: resuming once the seek lands is the receiver's
+           job. This only works alongside leaving the buffering messages alone
+           -- while both were driving the state, the re-buffering that follows
+           a seek pulled the pipeline back to PAUSED a fraction of a second
+           later, which is why playback used to die immediately after. */
+        hls_commanded_rate = 1.0f;
+        gst_element_set_state (renderer->pipeline, GST_STATE_PLAYING);
     } else {
         g_print("seek failed\n");
     }

@@ -2728,6 +2728,9 @@ extern "C" void on_video_scrub(void *cls, const float position) {
 
 extern "C" void on_video_rate(void *cls, const float rate) {
     LOGI("on_video_rate = %7.5f\n", rate);
+    if (rate == 1.0f || rate == 0.0f) {
+        video_renderer_set_commanded_rate(rate);
+    }
     if (rate == 1.0f) {
         video_renderer_resume();
     } else if (rate ==  0.0f) {

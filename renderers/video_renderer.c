@@ -40,6 +40,7 @@ static unsigned short width, height, width_source, height_source;  /* not curren
 static bool first_packet = false;
 static bool sync = false;
 static bool auto_videosink = true;
+static bool window_closed = false;
 static bool hls_video = false;
 #ifdef X_DISPLAY_FIX
 static bool use_x11 = false;
@@ -678,6 +679,12 @@ void video_renderer_hls_ready() {
     }
 }
 
+bool video_renderer_take_window_closed() {
+    bool closed = window_closed;
+    window_closed = false;
+    return closed;
+}
+
 void video_renderer_stop() {
     if (renderer) {
         logger_log(logger, LOGGER_DEBUG,"video_renderer_stop");
@@ -928,6 +935,9 @@ static gboolean gstreamer_video_pipeline_bus_callback(GstBus *bus, GstMessage *m
         g_free (debug);
         if (renderer->appsrc) {
             gst_app_src_end_of_stream (GST_APP_SRC(renderer->appsrc));
+        }
+        if (closed_window) {
+            window_closed = true;
         }
         if (!hls_video || closed_window) {
             gst_bus_set_flushing(bus, TRUE);

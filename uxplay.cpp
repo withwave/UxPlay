@@ -3224,6 +3224,14 @@ int main (int argc, char *argv[]) {
     compression_type = 0;
     close_window = new_window_closing_behavior;
     main_loop();
+    if (use_video && video_renderer_take_window_closed()) {
+        /* Closing the video window ends the session but leaves the server
+           advertising, instead of shutting UxPlay down. */
+        LOGI("Video window was closed: dropping the client, still waiting for AirPlay connections");
+        reset_httpd = true;
+        full_video_reset = true;
+        relaunch_video = true;
+    }
     if (relaunch_video) {
         if (reset_httpd) {
             raop_stop_httpd(raop);

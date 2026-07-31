@@ -67,6 +67,51 @@ char *create_fcup_request(const char *url, int request_id, const char *client_se
     return plist_xml; //needs to be freed after use
 }
 
+/* Tells the client that playback started, paused or stopped, over the reverse
+   connection it opened for exactly this. The client's transport follows these
+   events; /playback-info only feeds its progress display. Without them a client
+   that paused itself before scrubbing never learns that the seek finished and
+   playback resumed, so it sits showing stopped however healthy the stream is.
+   state is one of "loading", "playing", "paused" or "stopped". */
+int playback_state_event(void *conn_opaque, const char *state, const char *client_session_id) {
+
+    raop_conn_t *conn = (raop_conn_t *) conn_opaque;
+    raop_t *raop = conn->raop;
+    int requestlen = 0;
+    uint32_t datalen = 0;
+    char *plist_xml = NULL;
+
+    int socket_fd = httpd_get_connection_socket_by_type(raop->httpd, CONNECTION_TYPE_PTTH, 1);
+    if (socket_fd < 0) {
+        logger_log(raop->logger, LOGGER_DEBUG, "playback_state_event: no reverse connection");
+        return -1;
+    }
+
+    plist_t root_node = plist_new_dict();
+    plist_dict_set_item(root_node, "category", plist_new_string("video"));
+    plist_dict_set_item(root_node, "sessionID", plist_new_uint(1));
+    plist_dict_set_item(root_node, "state", plist_new_string(state));
+    plist_to_xml(root_node, &plist_xml, &datalen);
+    plist_free(root_node);
+
+    http_response_t *request = http_response_create();
+    http_response_reverse_request_init(request, "POST", "/event", "HTTP/1.1");
+    http_response_add_header(request, "X-Apple-Session-ID", client_session_id);
+    http_response_add_header(request, "Content-Type", "text/x-apple-plist+xml");
+    http_response_finish(request, plist_xml, (int) datalen);
+    free(plist_xml);
+
+    const char *http_request = http_response_get_data(request, &requestlen);
+    int send_len = send(socket_fd, http_request, requestlen, 0);
+    http_response_destroy(request);
+    if (send_len < 0) {
+        logger_log(raop->logger, LOGGER_ERR, "playback_state_event: send error");
+        return -1;
+    }
+    logger_log(raop->logger, LOGGER_DEBUG, "playback_state_event: sent state=%s", state);
+    return 0;
+}
+
 int fcup_request(void *conn_opaque, const char *media_url, const char *client_session_id, int request_id) {
 
     raop_conn_t *conn = (raop_conn_t *) conn_opaque;

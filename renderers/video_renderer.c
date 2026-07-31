@@ -62,6 +62,7 @@ static gint64 hls_requested_start_position = 0;
 static double hls_last_known_position = -1.0;
 static float hls_commanded_rate = 1.0f;
 static gboolean hls_paused_for_buffering = FALSE;
+static gboolean hls_seek_resuming = FALSE;
 static gint64 hls_seek_start = 0;
 static gint64 hls_seek_end = 0;
 static gint64 hls_duration = 0;
@@ -295,7 +296,10 @@ void video_renderer_init(logger_t *render_logger, const char *server_name, video
     hls_seek_end = -1;
     hls_duration = -1;
     hls_buffer_empty = TRUE;
-    hls_buffer_empty = FALSE;
+    hls_buffer_full = FALSE;          /* was a second assignment to _empty, so a
+                                         full buffer was inherited by the next
+                                         session and reported before any data
+                                         had arrived */
     type_hls = -1;
     type_264 = -1;
     type_265 = -1;
@@ -715,6 +719,11 @@ void video_renderer_hls_ready() {
     GstStateChangeReturn ret;
     if (renderer && hls_video) {
         logger_log(logger, LOGGER_DEBUG,"video_renderer_hls_ready");
+        /* Ending the video is a session ending as far as the sink is concerned:
+           without this it is only told when the client disconnects, so stopping
+           playback while staying connected left the window on screen. Done
+           before the pipeline drops to READY, while the sink is still there. */
+        video_renderer_set_stream_active(false);
         ret = gst_element_set_state (renderer->pipeline, GST_STATE_READY);
         logger_log(logger, LOGGER_DEBUG,"pipeline_state_change_return: %s",
                    gst_element_state_change_return_get_name(ret));
@@ -751,6 +760,12 @@ static void video_renderer_set_sink_property(const char *name, ...) {
 
 void video_renderer_set_commanded_rate(float rate) {
     hls_commanded_rate = rate;
+    if (rate == 0.0f) {
+        /* An explicit pause from the client outranks the resume a seek starts:
+           claiming to play through one is what made a previous attempt at this
+           worse, not better. */
+        hls_seek_resuming = FALSE;
+    }
 }
 
 void video_renderer_set_stream_active(bool active) {
@@ -892,6 +907,7 @@ static void hls_video_seek_to_start_position(GstElement *pipeline) {
         g_print("***************** seek to hls_requested_start_position %" GST_TIME_FORMAT "\n", GST_TIME_ARGS(hls_requested_start_position));
         if (gst_element_seek_simple (pipeline, GST_FORMAT_TIME,
 				 GST_SEEK_FLAG_FLUSH | GST_SEEK_FLAG_KEY_UNIT, hls_requested_start_position)) {
+            hls_last_known_position = ((double) hls_requested_start_position) / GST_SECOND;
             hls_requested_start_position = 0;
         } else {
             g_print("*** seek to requested_start_position failed\n"); 
@@ -1232,10 +1248,19 @@ bool video_get_playback_info(double *duration, double *position, double *seek_st
     /* A seek leaves the pipeline in PAUSED while it re-prerolls; a change
        already heading for PLAYING is reported as playing so the client is not
        told its play command failed. */
+    if (state == GST_STATE_PLAYING) {
+        hls_seek_resuming = FALSE;
+    }
     *rate = 0.0f;
     if (state == GST_STATE_PLAYING ||
         (state_ret == GST_STATE_CHANGE_ASYNC && pending == GST_STATE_PLAYING) ||
-        (hls_paused_for_buffering && hls_commanded_rate > 0.0f)) {
+        (hls_paused_for_buffering && hls_commanded_rate > 0.0f) ||
+        hls_seek_resuming) {
+        /* The pipeline settles through PAUSED on its way back from a seek, and
+           a single 0 reported from there is enough for the client to call
+           playback finished and stop following us. Whether a poll lands in that
+           gap is why the same seek sometimes works. The gap ends at PLAYING, or
+           sooner if the client asks for a pause of its own. */
         /* Buffering is not the same thing as stopped. A large seek empties the
            buffer and the pipeline is held in PAUSED while it refills; calling
            that a rate of 0 tells the client playback ended, and its transport
@@ -1292,8 +1317,13 @@ void video_renderer_seek(float position) {
     seek_position =  seek_position > hls_duration  - 1000 ? hls_duration - 1000 : seek_position;
     g_print("SCRUB: seek to %f secs =  %" GST_TIME_FORMAT ", duration = %" GST_TIME_FORMAT "\n", position,
             GST_TIME_ARGS(seek_position),  GST_TIME_ARGS(hls_duration));
+    /* KEY_UNIT snaps back to the keyframe before the target, landing five to
+       twelve seconds short of what was asked for. The client watches for its
+       requested position to be reached before it treats the seek as done, so
+       an undershoot on every seek leaves its transport waiting. A short skip
+       lands close enough not to notice, which is why those always worked. */
     gboolean result = gst_element_seek_simple(renderer->pipeline, GST_FORMAT_TIME,
-                                              (GstSeekFlags)(GST_SEEK_FLAG_FLUSH | GST_SEEK_FLAG_KEY_UNIT),
+                                              (GstSeekFlags)(GST_SEEK_FLAG_FLUSH | GST_SEEK_FLAG_ACCURATE),
                                               seek_position);
     if (result) {
         g_print("seek succeeded\n");
@@ -1304,6 +1334,13 @@ void video_renderer_seek(float position) {
            a seek pulled the pipeline back to PAUSED a fraction of a second
            later, which is why playback used to die immediately after. */
         hls_commanded_rate = 1.0f;
+        hls_seek_resuming = TRUE;
+        /* The position query fails for a moment while the seek settles, and the
+           fallback below would otherwise answer with where playback was before
+           it -- telling the client its seek was ignored, and leaving the app's
+           own idea of the position stuck there. Move the fallback to the place
+           we were asked for. */
+        hls_last_known_position = ((double) seek_position) / GST_SECOND;
         gst_element_set_state (renderer->pipeline, GST_STATE_PLAYING);
     } else {
         g_print("seek failed\n");

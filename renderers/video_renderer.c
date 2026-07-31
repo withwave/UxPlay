@@ -533,6 +533,18 @@ void video_renderer_init(logger_t *render_logger, const char *server_name, video
     }
 }
 
+/* The pipeline's own state is the truth here: a seek settling or a buffering
+   stall can move it without the client having asked for anything. */
+bool video_renderer_is_paused() {
+    GstState state;
+
+    if (!renderer || !renderer->pipeline) {
+        return false;
+    }
+    gst_element_get_state(renderer->pipeline, &state, NULL, 0);
+    return state == GST_STATE_PAUSED;
+}
+
 void video_renderer_pause() {
     if (!renderer) {
         return;
@@ -736,6 +748,51 @@ void video_renderer_set_key_handler(void (*handler)(const char *key)) {
     key_handler = handler;
 }
 
+/* Looking the sink up by GstVideoOverlay does not work inside playbin, which
+   contains several elements implementing that interface -- playsink answers
+   first and has none of these properties, so every setting was quietly thrown
+   away and the on-screen controls stayed blank. Search for the element that
+   actually carries the property instead. Returns a new reference. */
+static GstElement *find_element_with_property(GstBin *bin, const char *name) {
+    GstIterator *it;
+    GValue item = G_VALUE_INIT;
+    GstElement *found = NULL;
+    gboolean done = FALSE;
+
+    it = gst_bin_iterate_recurse(bin);
+    if (!it) {
+        return NULL;
+    }
+    while (!done) {
+        switch (gst_iterator_next(it, &item)) {
+        case GST_ITERATOR_OK: {
+            GstElement *element = GST_ELEMENT(g_value_get_object(&item));
+
+            if (element &&
+                g_object_class_find_property(G_OBJECT_GET_CLASS(element), name)) {
+                found = GST_ELEMENT(gst_object_ref(element));
+                done = TRUE;
+            }
+            g_value_reset(&item);
+            break;
+        }
+        case GST_ITERATOR_RESYNC:
+            if (found) {
+                gst_object_unref(found);
+                found = NULL;
+            }
+            gst_iterator_resync(it);
+            break;
+        default:
+            done = TRUE;
+            break;
+        }
+    }
+    g_value_unset(&item);
+    gst_iterator_free(it);
+    return found;
+}
+
 static void video_renderer_set_sink_property(const char *name, ...) {
     GstElement *sink;
     va_list args;
@@ -743,18 +800,15 @@ static void video_renderer_set_sink_property(const char *name, ...) {
     if (!renderer || !renderer->pipeline) {
         return;
     }
-    /* Only the patched osxvideosink carries these; any other sink simply has
-       no such property and is left alone. */
-    sink = gst_bin_get_by_interface(GST_BIN(renderer->pipeline),
-                                    GST_TYPE_VIDEO_OVERLAY);
+    /* Only the patched osxvideosink carries these; with any other sink nothing
+       matches and the call does nothing. */
+    sink = find_element_with_property(GST_BIN(renderer->pipeline), name);
     if (!sink) {
         return;
     }
-    if (g_object_class_find_property(G_OBJECT_GET_CLASS(sink), name)) {
-        va_start(args, name);
-        g_object_set_valist(G_OBJECT(sink), name, args);
-        va_end(args);
-    }
+    va_start(args, name);
+    g_object_set_valist(G_OBJECT(sink), name, args);
+    va_end(args);
     gst_object_unref(sink);
 }
 
@@ -774,6 +828,12 @@ void video_renderer_set_stream_active(bool active) {
 
 void video_renderer_show_volume(double level) {
     video_renderer_set_sink_property("volume-osd", level, NULL);
+}
+
+void video_renderer_set_playback_info (double position, double duration, double rate) {
+    video_renderer_set_sink_property("playback-position", position, NULL);
+    video_renderer_set_sink_property("playback-duration", duration, NULL);
+    video_renderer_set_sink_property("playback-rate", rate, NULL);
 }
 
 bool video_renderer_take_window_closed() {

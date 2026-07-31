@@ -76,6 +76,9 @@ enum
   ARG_STATUS_ITEM,
   ARG_VOLUME_OSD,
   ARG_STREAM_ACTIVE,
+  ARG_PLAYBACK_POSITION,
+  ARG_PLAYBACK_DURATION,
+  ARG_PLAYBACK_RATE,
 };
 
 static void gst_osx_video_sink_osxwindow_destroy (GstOSXVideoSink * osxvideosink);
@@ -210,10 +213,15 @@ gst_osx_video_sink_osxwindow_resize (GstOSXVideoSink * osxvideosink,
 
   GST_DEBUG_OBJECT (osxvideosink, "Resizing window to (%d,%d)", width, height);
 
-  /* Directly resize the underlying view */
+  /* Directly resize the underlying view. Dispatched without waiting: the main
+     thread is not always free -- an open menu holds it in modal event tracking
+     -- and blocking the streaming thread on it stalls the whole pipeline long
+     enough for the client to give up on us. Waiting used to be necessary so a
+     frame could not be drawn against a stale texture, but showFrame: now bounds
+     itself by the texture's real size, so arriving early is harmless. */
   GST_DEBUG_OBJECT (osxvideosink, "Calling setVideoSize on %p", osxwindow->gstview);
   gst_osx_video_sink_call_from_main_thread (osxvideosink, object,
-      @selector(resize), (id)nil, YES);
+      @selector(resize), (id)nil, NO);
 
   [pool release];
 }
@@ -401,6 +409,36 @@ gst_osx_video_sink_set_property (GObject * object, guint prop_id,
         }
       }
       break;
+    case ARG_PLAYBACK_POSITION:
+      osxvideosink->playback_position = g_value_get_double (value);
+      if (osxvideosink->osxwindow && osxvideosink->osxwindow->gstview) {
+        [osxvideosink->osxwindow->gstview
+            performSelectorOnMainThread: @selector(setPlaybackPosition:)
+                             withObject: [NSNumber numberWithDouble:
+                                 osxvideosink->playback_position]
+                          waitUntilDone: NO];
+      }
+      break;
+    case ARG_PLAYBACK_DURATION:
+      osxvideosink->playback_duration = g_value_get_double (value);
+      if (osxvideosink->osxwindow && osxvideosink->osxwindow->gstview) {
+        [osxvideosink->osxwindow->gstview
+            performSelectorOnMainThread: @selector(setPlaybackDuration:)
+                             withObject: [NSNumber numberWithDouble:
+                                 osxvideosink->playback_duration]
+                          waitUntilDone: NO];
+      }
+      break;
+    case ARG_PLAYBACK_RATE:
+      osxvideosink->playback_rate = g_value_get_double (value);
+      if (osxvideosink->osxwindow && osxvideosink->osxwindow->gstview) {
+        [osxvideosink->osxwindow->gstview
+            performSelectorOnMainThread: @selector(setPlaybackRate:)
+                             withObject: [NSNumber numberWithDouble:
+                                 osxvideosink->playback_rate]
+                          waitUntilDone: NO];
+      }
+      break;
     case ARG_VOLUME_OSD:
       osxvideosink->volume_osd = g_value_get_double(value);
       if (osxvideosink->osxwindow && osxvideosink->osxwindow->gstview) {
@@ -451,6 +489,15 @@ gst_osx_video_sink_get_property (GObject * object, guint prop_id,
       break;
     case ARG_STREAM_ACTIVE:
       g_value_set_boolean (value, osxvideosink->stream_started);
+      break;
+    case ARG_PLAYBACK_POSITION:
+      g_value_set_double (value, osxvideosink->playback_position);
+      break;
+    case ARG_PLAYBACK_DURATION:
+      g_value_set_double (value, osxvideosink->playback_duration);
+      break;
+    case ARG_PLAYBACK_RATE:
+      g_value_set_double (value, osxvideosink->playback_rate);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -585,6 +632,21 @@ gst_osx_video_sink_class_init (GstOSXVideoSinkClass * klass)
           "system does for its own volume keys. The value is the level to "
           "show, 0.0 - 1.0; writing it is what triggers the display",
           0.0, 1.0, 1.0, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+
+  g_object_class_install_property (gobject_class, ARG_PLAYBACK_POSITION,
+      g_param_spec_double ("playback-position", "playback position",
+          "Seconds into the stream, shown on the transport bar",
+          0.0, G_MAXDOUBLE, 0.0, G_PARAM_READWRITE));
+
+  g_object_class_install_property (gobject_class, ARG_PLAYBACK_RATE,
+      g_param_spec_double ("playback-rate", "playback rate",
+          "Rate the stream is playing at; 0 draws the play button",
+          0.0, G_MAXDOUBLE, 0.0, G_PARAM_READWRITE));
+
+  g_object_class_install_property (gobject_class, ARG_PLAYBACK_DURATION,
+      g_param_spec_double ("playback-duration", "playback duration",
+          "Length of the stream in seconds; 0 hides the transport bar",
+          0.0, G_MAXDOUBLE, 0.0, G_PARAM_READWRITE));
 
   g_object_class_install_property (gobject_class, ARG_STREAM_ACTIVE,
       g_param_spec_boolean ("stream-active", "stream active",

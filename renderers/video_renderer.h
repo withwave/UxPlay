@@ -66,6 +66,10 @@ void video_renderer_set_key_handler (void (*handler)(const char *key));
    Level is 0.0 - 1.0. Ignored by sinks without the feature. */
 void video_renderer_show_volume (double level);
 
+/* Feed the videosink the stream's position and length, so a sink that draws a
+   transport bar has something to draw. A duration of 0 means no timeline. */
+void video_renderer_set_playback_info (double position, double duration, double rate);
+
 /* Tell the videosink a session has ended. The pipeline is not always taken
    down when a client leaves (see the -nc workaround), so a sink that hides its
    window while idle cannot work this out for itself. */

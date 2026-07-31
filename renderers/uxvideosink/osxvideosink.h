@@ -88,6 +88,9 @@ struct _GstOSXVideoSink {
   gboolean status_item;
   gdouble volume_osd;
   gboolean stream_started;
+  gdouble playback_position;
+  gdouble playback_duration;
+  gdouble playback_rate;
   gboolean hide_when_windowed;
   GstVideoInfo info;
 };

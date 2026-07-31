@@ -2759,6 +2759,13 @@ extern "C" float on_video_playlist_remove (void *cls) {
 
 extern "C" void on_video_acquire_playback_info (void *cls, playback_info_t *playback_info) {
     int buffering_level;
+
+    /* A client streaming HLS polls this every second and never sends the
+       /feedback heartbeat, so counting only feedback declared it offline and
+       tore the session down about fifteen seconds into playback, whatever the
+       user was doing. Asking us for playback info is proof enough that it is
+       still there. */
+    missed_feedback = 0;
     bool still_playing = video_get_playback_info(&playback_info->duration, &playback_info->position,
                                                  &playback_info->seek_start, &playback_info->seek_duration,
                                                  &playback_info->rate,

@@ -1707,7 +1707,12 @@ restore:
       volumeDragging = YES;
     } else if (osdDuration > 0.0 &&
         [self transportProgressTrack: panel into: &track] &&
-        where.y < NSMinY (panel) + PLAYBACK_BAR_HEIGHT) {
+        NSPointInRect (where, NSMakeRect (NSMinX (track) - 8.0,
+            NSMinY (panel), NSWidth (track) + 16.0, PLAYBACK_BAR_HEIGHT))) {
+      /* Only the track itself, not the whole row: the clock readings sit at
+         either end of it, and treating those as part of the scrubber meant a
+         click on the total time seeked to the end of the video, which ends the
+         stream. */
       scrubbing = YES;
     } else if (osdDuration > 0.0) {
       if (NSPointInRect (where, [self transportButton: panel index: -1])) {
@@ -1770,11 +1775,14 @@ restore:
   }
 
   if (scrubbing && [self transportProgressTrack: panel into: &track]) {
+    double target;
+
     fraction = (float) ((where.x - NSMinX (track)) / NSWidth (track));
     fraction = (fraction < 0.0f) ? 0.0f : ((fraction > 1.0f) ? 1.0f : fraction);
+    target = fraction * osdDuration;
     /* Move the knob straight away; position reports only catch up a second
        later, and a scrubber that lags the pointer feels broken. */
-    osdPosition = fraction * osdDuration;
+    osdPosition = target;
     [self noteUserActivity];
     g_snprintf (name, sizeof (name), "uxplay-seek:%.3f", osdPosition);
     [self sendControlKey: name];

@@ -111,6 +111,9 @@ struct video_renderer_s {
 };
 
 static video_renderer_t *renderer = NULL;
+/* The http threads read the renderer while the main loop can be replacing it,
+   so both sides take this. Recursive: the teardown path crosses it twice. */
+static GRecMutex renderer_lock;
 static video_renderer_t *renderer_type[NCODECS] = {0};
 static int n_renderers = NCODECS;
 static char h264[] = "h264";
@@ -729,6 +732,7 @@ void video_renderer_flush() {
 void video_renderer_hls_ready() {
     GstState state;
     GstStateChangeReturn ret;
+    g_rec_mutex_lock(&renderer_lock);
     if (renderer && hls_video) {
         logger_log(logger, LOGGER_DEBUG,"video_renderer_hls_ready");
         /* Ending the video is a session ending as far as the sink is concerned:
@@ -742,6 +746,7 @@ void video_renderer_hls_ready() {
         gst_element_get_state(renderer->pipeline, &state, NULL, 1000 * GST_MSECOND);
         logger_log(logger, LOGGER_DEBUG,"pipeline state is %s", gst_element_state_get_name(state));
     }
+    g_rec_mutex_unlock(&renderer_lock);
 }
 
 void video_renderer_set_key_handler(void (*handler)(const char *key)) {
@@ -797,19 +802,23 @@ static void video_renderer_set_sink_property(const char *name, ...) {
     GstElement *sink;
     va_list args;
 
+    g_rec_mutex_lock(&renderer_lock);
     if (!renderer || !renderer->pipeline) {
+        g_rec_mutex_unlock(&renderer_lock);
         return;
     }
     /* Only the patched osxvideosink carries these; with any other sink nothing
        matches and the call does nothing. */
     sink = find_element_with_property(GST_BIN(renderer->pipeline), name);
     if (!sink) {
+        g_rec_mutex_unlock(&renderer_lock);
         return;
     }
     va_start(args, name);
     g_object_set_valist(G_OBJECT(sink), name, args);
     va_end(args);
     gst_object_unref(sink);
+    g_rec_mutex_unlock(&renderer_lock);
 }
 
 void video_renderer_set_commanded_rate(float rate) {
@@ -843,6 +852,7 @@ bool video_renderer_take_window_closed() {
 }
 
 void video_renderer_stop() {
+    g_rec_mutex_lock(&renderer_lock);
     if (renderer) {
         logger_log(logger, LOGGER_DEBUG,"video_renderer_stop");
         if (renderer->appsrc) {
@@ -851,6 +861,7 @@ void video_renderer_stop() {
         gst_element_set_state (renderer->pipeline, GST_STATE_NULL);
         //gst_element_set_state (renderer->playbin, GST_STATE_NULL);
      }
+    g_rec_mutex_unlock(&renderer_lock);
 }
 
 void video_renderer_set_device_model(const char *model, const char *name) {
@@ -881,47 +892,60 @@ void video_renderer_set_track_metadata(const char *title, const char *artist, co
     g_string_free(metadata, TRUE);
 }
 
-static void video_renderer_destroy_instance(video_renderer_t *renderer) {
-    if (renderer) {
-        logger_log(logger, LOGGER_DEBUG,"destroying renderer instance %p codec=%s ", renderer, renderer->codec);
+static void video_renderer_destroy_instance(video_renderer_t *instance) {
+    g_rec_mutex_lock(&renderer_lock);
+    if (instance) {
+        logger_log(logger, LOGGER_DEBUG,"destroying renderer instance %p codec=%s ", instance, instance->codec);
         GstState state;
         GstStateChangeReturn ret;
-        gst_element_get_state(renderer->pipeline, &state, NULL, 100 * GST_MSECOND);
+        gst_element_get_state(instance->pipeline, &state, NULL, 100 * GST_MSECOND);
         logger_log(logger, LOGGER_DEBUG,"pipeline state is %s", gst_element_state_get_name(state));
         if (state != GST_STATE_NULL) {
             if (!hls_video) {
-                gst_app_src_end_of_stream (GST_APP_SRC(renderer->appsrc));
+                gst_app_src_end_of_stream (GST_APP_SRC(instance->appsrc));
             }
-            ret = gst_element_set_state (renderer->pipeline, GST_STATE_NULL);
+            ret = gst_element_set_state (instance->pipeline, GST_STATE_NULL);
             logger_log(logger, LOGGER_DEBUG,"pipeline_state_change_return: %s",
                        gst_element_state_change_return_get_name(ret));
-            gst_element_get_state(renderer->pipeline, &state, NULL, 1000 * GST_MSECOND);
+            gst_element_get_state(instance->pipeline, &state, NULL, 1000 * GST_MSECOND);
             logger_log(logger, LOGGER_DEBUG,"pipeline state is %s", gst_element_state_get_name(state));
         }
-        if (renderer->appsrc) {
-            gst_object_unref (renderer->appsrc);
-            renderer->appsrc = NULL;
+        if (instance->appsrc) {
+            gst_object_unref (instance->appsrc);
+            instance->appsrc = NULL;
         }
-        if (renderer->textsrc) {
-            gst_object_unref (renderer->textsrc);
-            renderer->textsrc = NULL;
+        if (instance->textsrc) {
+            gst_object_unref (instance->textsrc);
+            instance->textsrc = NULL;
         }	
-        gst_object_unref(renderer->bus);
-        gst_object_unref(renderer->pipeline);
+        gst_object_unref(instance->bus);
+        gst_object_unref(instance->pipeline);
 #ifdef X_DISPLAY_FIX
-        if (renderer->gst_window){
-	  // free_X11_Display(renderer->gst_window);   without this, a memory leak; with it, a coredump
-            free(renderer->gst_window);
-            renderer->gst_window = NULL;
+        if (instance->gst_window){
+	  // free_X11_Display(instance->gst_window);   without this, a memory leak; with it, a coredump
+            free(instance->gst_window);
+            instance->gst_window = NULL;
         }
 #endif
-        if (renderer->uri) {
-            free(renderer->uri);
+        if (instance->uri) {
+            free(instance->uri);
         }
-        free (renderer);
-        renderer = NULL;
+        /* The parameter used to be called "renderer" too, so clearing it here
+           only cleared the parameter: the global went on pointing at the freed
+           instance, and the next /playback-info poll read a pipeline pointer
+           out of freed memory and crashed on it. */
+        if (renderer == instance) {
+            renderer = NULL;
+        }
+        for (int i = 0; i < n_renderers; i++) {
+            if (renderer_type[i] == instance) {
+                renderer_type[i] = NULL;
+            }
+        }
+        free (instance);
         logger_log(logger, LOGGER_DEBUG,"renderer destroyed\n");	
     }
+    g_rec_mutex_unlock(&renderer_lock);
 }
 
 void video_renderer_destroy() {
@@ -1114,9 +1138,15 @@ static gboolean gstreamer_video_pipeline_bus_callback(GstBus *bus, GstMessage *m
     case GST_MESSAGE_EOS:
         /* end-of-stream */
         logger_log(logger, LOGGER_INFO, "GStreamer: End-Of-Stream (video)");
-        if (hls_video) {
-            gst_bus_set_flushing(bus, TRUE);
-            gst_element_set_state (renderer->pipeline, GST_STATE_READY);
+        if (hls_video && renderer) {
+            /* Hold at the end rather than dropping to READY, and leave the bus
+               alone. Flushing it threw away every later message, buffering
+               included -- and buffering is what brings the pipeline back to
+               PLAYING after a seek, so scrubbing once the video had run out
+               prerolled and then sat in PAUSED for good. Tearing the pipeline
+               down belongs to the path that runs when the client actually
+               leaves, not to reaching the end of a video. */
+            gst_element_set_state (renderer->pipeline, GST_STATE_PAUSED);
             renderer->eos = TRUE;
         }
         break;
@@ -1278,7 +1308,19 @@ int video_renderer_choose_codec (bool video_is_jpeg, bool video_is_h265) {
 }
     
 
+static bool video_get_playback_info_locked(double *duration, double *position, double *seek_start, double *seek_duration, float *rate, bool *buffer_empty, bool *buffer_full);
+
 bool video_get_playback_info(double *duration, double *position, double *seek_start, double *seek_duration, float *rate, bool *buffer_empty, bool *buffer_full) {
+    bool ret;
+
+    g_rec_mutex_lock(&renderer_lock);
+    ret = video_get_playback_info_locked(duration, position, seek_start, seek_duration,
+                                         rate, buffer_empty, buffer_full);
+    g_rec_mutex_unlock(&renderer_lock);
+    return ret;
+}
+
+static bool video_get_playback_info_locked(double *duration, double *position, double *seek_start, double *seek_duration, float *rate, bool *buffer_empty, bool *buffer_full) {
     gint64 pos = 0;
     GstState state;
     *duration = 0.0;
@@ -1415,7 +1457,9 @@ unsigned int video_renderer_listen(void *loop, int id) {
 }
 
 bool video_renderer_eos_watch() {
-    if (hls_video && renderer->eos) {
+    /* Runs on a 100ms timer, including while the loop thread is replacing the
+       renderer, so the pointer has to be checked. */
+    if (hls_video && renderer && renderer->eos) {
         renderer->eos = FALSE;
 	return true;
     }

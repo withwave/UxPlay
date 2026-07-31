@@ -703,6 +703,16 @@ static gboolean video_eos_watch_callback (gpointer loop) {
     if (video_renderer_eos_watch()) {
         /* HLS video has sent EOS */
         LOGI("hls video has sent EOS");
+        if (open_connections) {
+            /* Running out of video is not the client going away: it may scrub
+               back, or queue the next item. Tearing the renderer down here took
+               the window off the screen mid-session and left the client talking
+               about a video that no longer existed. Hold everything where it is
+               and just report that nothing is playing. */
+            LOGI("client is still connected: holding the session open");
+            video_renderer_set_commanded_rate(0.0f);
+            return TRUE;
+        }
         video_renderer_hls_ready();
         raop_handle_eos(raop);
     }

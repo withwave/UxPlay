@@ -711,6 +711,12 @@ static gboolean video_eos_watch_callback (gpointer loop) {
                and just report that nothing is playing. */
             LOGI("client is still connected: holding the session open");
             video_renderer_set_commanded_rate(0.0f);
+            /* Do NOT announce a stop from here. Tried: the client takes it as
+               the session ending, blacks out and will not start anything after
+               it. Reaching the end of a video is not the end of the session --
+               the client may scrub back or queue the next item -- and whatever
+               tells it the item finished, "stopped" on the reverse channel is
+               not it. */
             return TRUE;
         }
         video_renderer_hls_ready();
@@ -768,6 +774,9 @@ static void video_window_key_pressed(const char *key) {
        way, since the key channel is already carrying window input to us. */
     if (!strncmp(key, "uxplay-seek:", 12)) {
         video_renderer_seek((float) atof(key + 12));
+        if (raop) {
+            raop_announce_seek(raop);
+        }
         return;
     }
     if (!strncmp(key, "uxplay-volume:", 14)) {
@@ -782,6 +791,17 @@ static void video_window_key_pressed(const char *key) {
             target = 0.0;
         }
         video_renderer_seek((float) target);
+        if (raop) {
+            raop_announce_seek(raop);
+        }
+        return;
+    }
+    /* Previous and next item are the client's playlist, not ours: it owns the
+       queue and we only ever see one item at a time. They go back over DACP. */
+    if (!strcmp(key, "uxplay-previtem") || !strcmp(key, "uxplay-nextitem")) {
+        if (raop) {
+            raop_dacp_command(raop, key + strlen("uxplay-"));
+        }
         return;
     }
     if (!strcmp(key, "uxplay-playpause")) {
@@ -819,6 +839,9 @@ static void video_window_key_pressed(const char *key) {
 static void statusbar_seek_requested(double position) {
     if (use_video) {
         video_renderer_seek((float) position);
+        if (raop) {
+            raop_announce_seek(raop);
+        }
     }
 }
 
@@ -2799,6 +2822,15 @@ extern "C" void on_video_play(void *cls, const char* location, const float start
     video_renderer_hls_ready();
     /* start_position needs to be implemented */
     video_renderer_set_start(start_position);
+    /* The item is about to begin somewhere other than where the client last saw
+       the playhead, and it has to be told to go and read it. This is the same
+       transition it commits a position on everywhere else -- paused here, and
+       playing once the item is really running, which the playback-info handler
+       sends off the rate it actually reports. Announcing the start alone left
+       the client knowing a new item had begun but not where. */
+    if (raop) {
+        raop_announce_seek(raop);
+    }
     /* HLS goes through neither video_process() nor audio_process(), so without
        this the menu bar sits at "waiting for a client" throughout playback and
        the progress row never appears. */

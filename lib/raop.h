@@ -144,6 +144,10 @@ RAOP_API void raop_remove_known_connections(raop_t * raop);
    away so the client releases the session instead of being cut off mid-stream,
    which leaves its player stuck until the app is restarted. */
 RAOP_API void raop_announce_playback_stopped(raop_t *raop);
+RAOP_API void raop_announce_seek(raop_t *raop);
+/* "nextitem", "previtem": remote-control commands sent back to the client over
+   DACP, which is the only channel that carries them. */
+RAOP_API void raop_dacp_command(raop_t *raop, const char *command);
 RAOP_API void raop_remove_hls_connections(raop_t * raop);
 RAOP_API void raop_destroy_airplay_video(raop_t *raop, int id);
 RAOP_API void raop_playlist_remove(raop_t *raop, void *airplay_video, float position);

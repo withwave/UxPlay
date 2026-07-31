@@ -23,6 +23,7 @@
 #include "raop_rtp.h"
 #include "pairing.h"
 #include "httpd.h"
+#include "dacp_remote.h"
 
 #include "global.h"
 #include "fairplay.h"
@@ -340,9 +341,14 @@ conn_request(void *ptr, http_request_t *request, http_response_t **response) {
     if (!conn->have_active_remote) {
         const char *active_remote = http_request_get_header(request, "Active-Remote");
         if (active_remote) {
+            const char *dacp_id = http_request_get_header(request, "DACP-ID");
+
             conn->have_active_remote = true;
+            /* Kept whether or not -dacp was asked for: this is what lets the
+               receiver drive the client's playlist, which is the only route to
+               previous/next item. */
+            dacp_remote_set_client(dacp_id, active_remote);
             if (raop->callbacks.export_dacp) {
-                const char *dacp_id = http_request_get_header(request, "DACP-ID");
                 raop->callbacks.export_dacp(raop->callbacks.cls, active_remote, dacp_id);
             }
         }
@@ -855,6 +861,43 @@ void raop_announce_playback_stopped(raop_t *raop) {
     if (airplay_video) {
         playback_state_event(raop, "stopped", get_apple_session_id(airplay_video));
     }
+}
+
+/* A seek made on the receiver -- the on-screen panel, the menu bar -- reaches
+   the pipeline without the client having asked for anything, so the client is
+   never told the playhead moved. It finds out only from the position in its own
+   once-a-second poll, and a position that went backwards while it believes the
+   stream is playing at rate 1 looks to it like a stale answer to an earlier
+   request: it keeps its own clock, which then runs ahead of us for good, so
+   every later report is behind it and is dropped too. That is why a backwards
+   seek on the panel stopped the app's clock and no forward seek afterwards
+   brought it back. Announcing the seek gives it a state change to resync on.
+
+   "paused" rather than "loading", because that is the transition the client is
+   observed to recover from. Its own seeks work, and around one of those the
+   channel carries paused (its pre-scrub rate of 0), then playing (its rate of 1
+   once the seek has landed) -- and from there it follows us again. Announcing
+   "loading" instead was tried first and changed nothing, although every event
+   went out. The resume half is not sent from here: the seek has not landed yet,
+   and http_handler_playback_info sends "playing" off the state we actually
+   reach, which is the same order the client's own seek produces. */
+void raop_announce_seek(raop_t *raop) {
+    assert(raop);
+    airplay_video_t *airplay_video = (airplay_video_t *) hls_get_current_video(raop);
+    if (airplay_video) {
+        playback_state_event(raop, "paused", get_apple_session_id(airplay_video));
+    }
+}
+
+/* Previous and next item. Nothing in the AirPlay HTTP channel carries them --
+   the only playlist traffic seen from the client is playlistRemove, and it is
+   the client telling us, not the other way round -- so they go back over DACP,
+   the remote-control channel the client points us at with its DACP-ID and
+   Active-Remote headers. Verified against the YouTube app: it answers
+   nextitem with playlistRemove, stop, and a fresh play. */
+void raop_dacp_command(raop_t *raop, const char *command) {
+    assert(raop);
+    dacp_remote_send(raop->logger, command);
 }
 
 void raop_remove_known_connections(raop_t * raop) {

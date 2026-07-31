@@ -128,16 +128,12 @@ http_handler_scrub(raop_conn_t *conn, http_request_t *request, http_response_t *
     logger_log(raop->logger, LOGGER_DEBUG, "**********************SCRUB %f ***********************",scrub_position);
     raop->callbacks.on_video_scrub(raop->callbacks.cls, scrub_position);
 
-    /* The client pauses itself before scrubbing and waits to be told playback
-       resumed; its transport follows these events, not the /playback-info it
-       polls. Without this it stays showing stopped however healthy the stream
-       is. */
-    {
-        airplay_video_t *airplay_video = (airplay_video_t *) hls_get_current_video(raop);
-        if (airplay_video) {
-            playback_state_event(raop, "playing", get_apple_session_id(airplay_video));
-        }
-    }
+    /* No state event here. Announcing "playing" the moment a scrub arrives
+       described a state we were not in -- the seek has not landed, the pipeline
+       is back in PAUSED and the buffer is refilling -- and the client answered
+       it by commanding a pause of its own on the very next request. The state
+       the client is told is now driven by the state we actually report, in
+       http_handler_playback_info below. */
 }
 
 static void
@@ -369,17 +365,19 @@ int create_playback_info_plist_xml(playback_info_t *playback_info, char **plist_
     plist_t rate_node = plist_new_real(playback_info->rate);
     plist_dict_set_item(res_root_node, "rate", rate_node);
 
-    /* should these be int or bool? */
-    plist_t ready_to_play_node = plist_new_uint(playback_info->ready_to_play);
+    /* Booleans in the playback-info plist, and a real receiver sends them as
+       <true/>/<false/>. They went out as <integer> here, which a decoder that
+       asks for a boolean reads as absent rather than as false. */
+    plist_t ready_to_play_node = plist_new_bool(playback_info->ready_to_play);
     plist_dict_set_item(res_root_node, "readyToPlay", ready_to_play_node);
 
-    plist_t playback_buffer_empty_node = plist_new_uint(playback_info->playback_buffer_empty);
+    plist_t playback_buffer_empty_node = plist_new_bool(playback_info->playback_buffer_empty);
     plist_dict_set_item(res_root_node, "playbackBufferEmpty", playback_buffer_empty_node);
 
-    plist_t playback_buffer_full_node = plist_new_uint(playback_info->playback_buffer_full);
+    plist_t playback_buffer_full_node = plist_new_bool(playback_info->playback_buffer_full);
     plist_dict_set_item(res_root_node, "playbackBufferFull", playback_buffer_full_node);
 
-    plist_t playback_likely_to_keep_up_node = plist_new_uint(playback_info->playback_likely_to_keep_up);
+    plist_t playback_likely_to_keep_up_node = plist_new_bool(playback_info->playback_likely_to_keep_up);
     plist_dict_set_item(res_root_node, "playbackLikelyToKeepUp", playback_likely_to_keep_up_node);
 
     plist_t loaded_time_ranges_node = plist_new_array();
@@ -433,20 +431,56 @@ http_handler_playback_info(raop_conn_t *conn, http_request_t *request, http_resp
         return;
     }      
 
-    playback_info.num_loaded_time_ranges = 1; 
-    time_range_t time_ranges_loaded[1];
-    time_ranges_loaded[0].start = playback_info.position;
-    time_ranges_loaded[0].duration = playback_info.duration - playback_info.position;
-    playback_info.loadedTimeRanges = (void *) &time_ranges_loaded;
-
     playback_info.num_seekable_time_ranges = 1;
     time_range_t time_ranges_seekable[1];
     time_ranges_seekable[0].start = playback_info.seek_start;
     time_ranges_seekable[0].duration = playback_info.seek_duration;
     playback_info.seekableTimeRanges = (void *) &time_ranges_seekable;
 
+    /* The loaded range began at the playhead, which claims nothing behind it is
+       buffered. Playing forwards that range only shrinks from the left, which
+       agrees with playback moving on; seek backwards and it suddenly covers
+       material we had just said we did not have, which cannot happen to a real
+       buffer. The client drops the item state at that point and stops following
+       our position -- and stays that way until it seeks itself, which resets the
+       item and is exactly when it starts working again. Every other field in
+       this response was checked against the wire and is identical in both
+       directions; this was the only quantity left whose meaning depended on
+       which way the seek went.
+
+       Nor is it true. This is a VOD playlist, all of it reachable, which is
+       what the seekable range above already says. Reporting the same extent for
+       both leaves nothing that changes with the playhead at all. */
+    playback_info.num_loaded_time_ranges = 1;
+    time_range_t time_ranges_loaded[1];
+    if (time_ranges_seekable[0].duration > 0.0) {
+        time_ranges_loaded[0] = time_ranges_seekable[0];
+    } else {
+        time_ranges_loaded[0].start = 0.0;
+        time_ranges_loaded[0].duration = playback_info.duration;
+    }
+    playback_info.loadedTimeRanges = (void *) &time_ranges_loaded;
+
     *response_datalen =  create_playback_info_plist_xml(&playback_info, response_data);
     http_response_add_header(response, "Content-Type", "text/x-apple-plist+xml");
+
+    /* Announce a resume from the state we are actually in, rather than echoing
+       the client's own commands back at it. The dedupe inside makes this one
+       event per real transition, not one per poll.
+
+       This is also the only thing that tells the client about a seek made on
+       the receiver -- the on-screen panel, the menu bar -- which reaches the
+       pipeline without any request from the client and so produced no event at
+       all before. Only the resume is announced here: a "paused" event stops the
+       client polling us, and this handler is the poll, so sending one from here
+       would take away the very thing that would later undo it. Pauses stay with
+       the /rate handler, where the client asked for them. */
+    if (playback_info.rate > 0.0f) {
+        airplay_video_t *airplay_video = (airplay_video_t *) hls_get_current_video(raop);
+        if (airplay_video) {
+            playback_state_event(raop, "playing", get_apple_session_id(airplay_video));
+        }
+    }
 }
 
 /* this handles the POST /reverse request from Client to Server on a AirPlay http channel to "Upgrade" 
@@ -776,6 +810,10 @@ http_handler_play(raop_conn_t *conn, http_request_t *request, http_response_t *r
     airplay_video_t *airplay_video = NULL;
     
     logger_log(raop->logger, LOGGER_DEBUG, "http_handler_play");
+
+    /* A new video starts with the client knowing nothing, so no state carries
+       over from the last one. */
+    playback_state_event_reset();
 
     const char* apple_session_id = http_request_get_header(request, "X-Apple-Session-ID");
     if (!apple_session_id) {

@@ -50,6 +50,10 @@ endif()
 
 if (USE_DNS_SD OR ( APPLE AND NOT USE_MDNS ))
   message ( STATUS "******** using Bounjour/Apple dns_sd.h for Service Discovery")
+  # Resolving the client's DACP control service needs dns_sd.h; the bundled
+  # mdnsd only registers, it cannot browse or resolve. Without this the
+  # remote-control commands (previous/next item) compile away.
+  add_definitions( -DHAVE_DNS_SD )
   add_subdirectory( lib/dns_sd)
   if (UNIX AND NOT APPLE)
     add_definitions( -DSUPPRESS_AVAHI_COMPAT_WARNING )

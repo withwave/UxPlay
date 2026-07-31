@@ -94,6 +94,15 @@ char *create_fcup_request(const char *url, int request_id, const char *client_se
    that paused itself before scrubbing never learns that the seek finished and
    playback resumed, so it sits showing stopped however healthy the stream is.
    state is one of "loading", "playing", "paused" or "stopped". */
+/* The last state the client was successfully told about. File-scope so it can be
+   cleared when a new video starts: it used to outlive the session it belonged
+   to, and a state repeated across two videos was then swallowed as a duplicate. */
+static char playback_state_last[16] = "";
+
+void playback_state_event_reset(void) {
+    playback_state_last[0] = '\0';
+}
+
 int playback_state_event(raop_t *raop, const char *state, const char *client_session_id) {
 
     /* Only on a real change. A drag on the client's scrubber arrives as a
@@ -102,12 +111,9 @@ int playback_state_event(raop_t *raop, const char *state, const char *client_ses
        and has no ordering between the two. The client's control channel gave up
        under that, stopping the feedback it owes us, and the session was then
        dropped for going quiet. */
-    static char last_state[16] = "";
-    if (!strncmp(last_state, state, sizeof(last_state) - 1)) {
+    if (!strcmp(playback_state_last, state)) {
         return 0;
     }
-    strncpy(last_state, state, sizeof(last_state) - 1);
-    last_state[sizeof(last_state) - 1] = '\0';
 
     int requestlen = 0;
     uint32_t datalen = 0;
@@ -142,6 +148,12 @@ int playback_state_event(raop_t *raop, const char *state, const char *client_ses
         logger_log(raop->logger, LOGGER_ERR, "playback_state_event: send error");
         return -1;
     }
+    /* Recorded only now. It used to be stamped before the reverse connection was
+       even looked up, so a state the client never received still counted as
+       delivered -- and every later attempt at that same state was then dropped
+       as a duplicate, for the life of the process. */
+    strncpy(playback_state_last, state, sizeof(playback_state_last) - 1);
+    playback_state_last[sizeof(playback_state_last) - 1] = '\0';
     logger_log(raop->logger, LOGGER_DEBUG, "playback_state_event: sent state=%s", state);
     return 0;
 }

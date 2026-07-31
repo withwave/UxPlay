@@ -682,13 +682,20 @@ osd_fill_round_rect (float x, float y, float w, float h, float r)
 #define CLOSE_BUTTON_SIZE      34.0f
 #define PLAYBACK_BAR_MARGIN    36.0f
 #define PLAYBACK_BAR_HEIGHT    44.0f     /* one row of the transport panel */
-#define PLAYBACK_BAR_MAX_WIDTH 520.0f
-#define PLAYBACK_BAR_MIN_WIDTH 360.0f
+/* Five transport buttons now sit between the volume slider on the left of the
+   top row and the fullscreen button on its right, so the row has to be wide
+   enough for all of it: the leftmost button must clear the volume control's hit
+   rect, which reaches 162 from the row's left edge. With the spacing below that
+   needs 2*(162 + TRANSPORT_HIT/2 + 2*TRANSPORT_SPACING) = 550. Below the
+   minimum the panel hides itself, as it did before. */
+#define PLAYBACK_BAR_MAX_WIDTH 600.0f
+#define PLAYBACK_BAR_MIN_WIDTH 560.0f
 #define PLAYBACK_TRACK_HEIGHT  6.0f
 #define PLAYBACK_CLOCK_WIDTH   52.0f
 #define PLAYBACK_TEXT_INSET    16.0f
 #define TRANSPORT_ICON         22.0f
 #define TRANSPORT_HIT          34.0f
+#define TRANSPORT_SPACING      48.0f
 #define TRANSPORT_VOLUME_WIDTH 104.0f
 
 /* Where the close button sits, in view coordinates with the origin at the
@@ -718,6 +725,14 @@ osd_fill_round_rect (float x, float y, float w, float h, float r)
 
 - (void) setPlaybackPosition: (NSNumber *) seconds
 {
+  /* The knob belongs to the user while they are holding it. This arrives once a
+     second from the client's playback-info poll and writes the same variable
+     the drag moves, so the knob was being pulled back to where the pipeline
+     still is every second of the drag -- and the seek that goes out on release
+     carries whichever of the two wrote last. */
+  if (scrubbing) {
+    return;
+  }
   osdPosition = [seconds doubleValue];
   if (osdDuration > 0.0) {
     [self setNeedsDisplay: YES];
@@ -792,10 +807,11 @@ osd_fill_round_rect (float x, float y, float w, float h, float r)
       TRANSPORT_VOLUME_WIDTH, PLAYBACK_TRACK_HEIGHT);
 }
 
+/* -2 previous item, -1 back ten, 0 play/pause, 1 forward ten, 2 next item. */
 - (NSRect) transportButton: (NSRect) panel index: (int) which
 {
   NSRect row = [self transportTopRow: panel];
-  CGFloat cx = NSMidX (row) + which * 52.0;
+  CGFloat cx = NSMidX (row) + which * TRANSPORT_SPACING;
 
   return NSMakeRect (cx - TRANSPORT_HIT / 2.0, NSMidY (row) - TRANSPORT_HIT / 2.0,
       TRANSPORT_HIT, TRANSPORT_HIT);
@@ -1004,6 +1020,14 @@ osd_draw_slider (NSRect track, float fraction, float alpha, BOOL knob)
 
   glColor4f (1.0f, 1.0f, 1.0f, 0.95f * alpha);
 
+  /* Previous item: a bar with a triangle running back into it. */
+  r = [self transportButton: panel index: -2];
+  cx = (float) NSMidX (r);
+  cy = (float) NSMidY (r);
+  s = 6.0f;
+  osd_fill_quad (cx - s - 3.0f, cy - s, 2.5f, 2.0f * s);
+  osd_fill_triangle (cx + s, cy + s, cx + s, cy - s, cx - s, cy);
+
   /* Skip back ten seconds. */
   r = [self transportButton: panel index: -1];
   cx = (float) NSMidX (r);
@@ -1032,6 +1056,14 @@ osd_draw_slider (NSRect track, float fraction, float alpha, BOOL knob)
   osd_fill_triangle (cx - s * 1.2f - 1.0f, cy + s, cx - s * 1.2f - 1.0f, cy - s,
       cx - 1.0f, cy);
   osd_fill_triangle (cx + 1.0f, cy + s, cx + 1.0f, cy - s, cx + 1.0f + s * 1.2f, cy);
+
+  /* Next item: the previous-item glyph mirrored. */
+  r = [self transportButton: panel index: 2];
+  cx = (float) NSMidX (r);
+  cy = (float) NSMidY (r);
+  s = 6.0f;
+  osd_fill_triangle (cx - s, cy + s, cx - s, cy - s, cx + s, cy);
+  osd_fill_quad (cx + s + 0.5f, cy - s, 2.5f, 2.0f * s);
 
   /* Fullscreen: a screen outline with a stand, as macOS draws it. */
   r = [self transportFullScreenButton: panel];
@@ -1715,6 +1747,10 @@ restore:
          stream. */
       scrubbing = YES;
     } else if (osdDuration > 0.0) {
+      if (NSPointInRect (where, [self transportButton: panel index: -2])) {
+        [self sendControlKey: "uxplay-previtem"];
+        return YES;
+      }
       if (NSPointInRect (where, [self transportButton: panel index: -1])) {
         [self sendControlKey: "uxplay-skip:-10"];
         return YES;
@@ -1727,6 +1763,10 @@ restore:
         [self sendControlKey: "uxplay-skip:10"];
         return YES;
       }
+      if (NSPointInRect (where, [self transportButton: panel index: 2])) {
+        [self sendControlKey: "uxplay-nextitem"];
+        return YES;
+      }
       if (NSPointInRect (where, [self transportFullScreenButton: panel])) {
         [self toggleFillScreen];
         return YES;
@@ -1736,13 +1776,20 @@ restore:
       return YES;
     }
 
-    if (!volumeDragging && !scrubbing) {
-      /* Anywhere on the panel that is not a control is a handle: the panel can
-         sit over something the user wants to see. */
-      panelDragging = YES;
-      panelDragAnchor = where;
-      panelOffsetAtAnchor = panelOffset;
+    if (volumeDragging || scrubbing) {
+      /* Apply the point the press landed on straight away. Both controls used
+         to wait for a drag before they moved at all, so a plain click on the
+         middle of the track armed the control and then released it at the value
+         it already had: clicking the scrubber to jump did nothing whatsoever,
+         and neither did clicking a spot on the volume slider. */
+      [self controlsAtPoint: where begin: NO];
+      return YES;
     }
+    /* Anywhere on the panel that is not a control is a handle: the panel can
+       sit over something the user wants to see. */
+    panelDragging = YES;
+    panelDragAnchor = where;
+    panelOffsetAtAnchor = panelOffset;
     return YES;
   }
 
@@ -1780,12 +1827,13 @@ restore:
     fraction = (float) ((where.x - NSMinX (track)) / NSWidth (track));
     fraction = (fraction < 0.0f) ? 0.0f : ((fraction > 1.0f) ? 1.0f : fraction);
     target = fraction * osdDuration;
-    /* Move the knob straight away; position reports only catch up a second
-       later, and a scrubber that lags the pointer feels broken. */
+    /* Only the knob moves while the drag is in progress. Seeking on every drag
+       event fired dozens to hundreds of flushing seeks for a single drag, and
+       an HLS pipeline re-fetches segments for each one: the position never
+       settles, so a client polling us through the drag has nothing stable to
+       put on its own progress bar. A real receiver seeks once, on release. */
     osdPosition = target;
     [self noteUserActivity];
-    g_snprintf (name, sizeof (name), "uxplay-seek:%.3f", osdPosition);
-    [self sendControlKey: name];
     return YES;
   }
   return NO;
@@ -1813,6 +1861,12 @@ restore:
 - (void)mouseUp:(NSEvent *) event;
 {
   if (scrubbing || volumeDragging || panelDragging) {
+    if (scrubbing && osdDuration > 0.0) {
+      char name[64];
+
+      g_snprintf (name, sizeof (name), "uxplay-seek:%.3f", osdPosition);
+      [self sendControlKey: name];
+    }
     scrubbing = NO;
     volumeDragging = NO;
     panelDragging = NO;

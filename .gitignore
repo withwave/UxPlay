@@ -9,3 +9,6 @@ cmake_uninstall.cmake
 Makefile
 *.a
 /uxplay
+
+# left behind by "make install"
+install_manifest.txt

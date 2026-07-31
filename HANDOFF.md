@@ -7,8 +7,16 @@
 
 ```sh
 make -j$(sysctl -n hw.ncpu)
-script -q /dev/null ./uxplay -hls -d 1 \
-  -vs "uxvideosink force-aspect-ratio=true start-fullscreen=true hide-until-stream=true max-lateness=-1 qos=false"
+./uxplay-mac -d 1
+```
+
+`uxplay-mac`이 아래 옵션을 싣는 래퍼다. 빌드 트리에서 실행하면 옆의 `./uxplay`를, 아니면 PATH의
+것을 쓴다. 인자는 그대로 전달되고, `-vs`를 직접 주면 아래 싱크 줄을 대체한다. `make install`이
+`/usr/local/bin`에 함께 설치한다 (APPLE 한정).
+
+```sh
+uxplay -hls -vs "uxvideosink force-aspect-ratio=true start-fullscreen=true \
+  hide-until-stream=true max-lateness=-1 qos=false"
 ```
 
 - 로그를 파이프로 넘기면 `script`가 `tcgetattr/ioctl` 오류로 죽는다. 리다이렉트 없이 실행하고 출력 파일을 따로 읽을 것.
@@ -253,5 +261,4 @@ playback_info: PLAYING rate 1.0     위치는 계속 진행
 - 메뉴바 메뉴는 육안 검증을 한 번도 하지 못했다. 진행/시크 행이 실제로 어떻게 보이는지 확인 필요
 - 재생 패널 위치를 세션 간 기억할지
 - 앨범 아트, 참고 UI 오른쪽의 `»` 자리 기능
-- `sudo make install` / 실행 래퍼 스크립트
 - 상류 보고: osxvideosink의 회전 크래시와 티어링 두 건

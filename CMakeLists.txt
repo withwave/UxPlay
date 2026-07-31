@@ -86,6 +86,10 @@ if (DBUS_FOUND)
 endif()
 
 install( TARGETS  uxplay RUNTIME DESTINATION bin )
+if ( APPLE )
+  # Launcher carrying the videosink options this build needs; see HANDOFF.md.
+  install( PROGRAMS uxplay-mac DESTINATION bin )
+endif()
 install( FILES uxplay.1 DESTINATION ${CMAKE_INSTALL_MANDIR}/man1 )
 install( FILES README.md README.txt README.html LICENSE DESTINATION ${CMAKE_INSTALL_DOCDIR} ) 
 install( FILES lib/llhttp/LICENSE-MIT DESTINATION ${CMAKE_INSTALL_DOCDIR}/llhttp )

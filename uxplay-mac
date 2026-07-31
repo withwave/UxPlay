@@ -1,0 +1,54 @@
+#!/bin/sh
+#
+# UxPlay on macOS, with the videosink options this build needs.
+#
+# Every one of them is load-bearing; see HANDOFF.md for how each was arrived at.
+# Anything given on the command line is passed straight through, so
+#
+#     uxplay-mac -n "Living Room" -d
+#
+# works, and supplying -vs yourself replaces the sink line below rather than
+# fighting with it.
+
+set -eu
+
+# The vendored uxvideosink is linked into the binary, so no plugin path is
+# needed and no GStreamer videosink has to be installed separately.
+#
+#   force-aspect-ratio=true   osxvideosink's own default is false
+#   start-fullscreen=true     pseudo-fullscreen; the native one races teardown
+#   hide-until-stream=true    no empty window between sessions
+#   max-lateness=-1 qos=false stops GstBaseSink dropping frames that miss its
+#                             5 ms deadline. Without them portrait collapses to
+#                             a few fps: it negotiates 498x1080, so each frame
+#                             is 1080 unaligned row copies against 884 aligned
+#                             ones in landscape, just slow enough to be late.
+#                             The frames were decoded fine and thrown away at
+#                             the last step.
+VIDEOSINK='uxvideosink force-aspect-ratio=true start-fullscreen=true hide-until-stream=true max-lateness=-1 qos=false'
+
+# Do NOT add -vsync no here, whatever the README suggests for macOS: it sets
+# sync=false on the sinks, which breaks audio/video timestamp sync and makes
+# the audio drift. The frame drops it is meant to cure are QoS drops, which the
+# two options above fix properly.
+
+# Find the binary: prefer one sitting next to this script (a build tree),
+# otherwise whatever is on PATH.
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+if [ -x "$here/uxplay" ]; then
+    UXPLAY="$here/uxplay"
+elif command -v uxplay >/dev/null 2>&1; then
+    UXPLAY=$(command -v uxplay)
+else
+    echo "uxplay-mac: cannot find the uxplay binary" >&2
+    exit 1
+fi
+
+# Let the caller pick the sink instead, if they want to.
+for arg in "$@"; do
+    if [ "$arg" = "-vs" ]; then
+        exec "$UXPLAY" -hls "$@"
+    fi
+done
+
+exec "$UXPLAY" -hls -vs "$VIDEOSINK" "$@"

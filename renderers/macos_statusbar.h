@@ -45,6 +45,10 @@ void statusbar_set_volume(double fraction);
 /* Invoked when the volume slider is dragged, with the same 0.0 - 1.0 scale. */
 void statusbar_set_volume_handler(void (*handler)(double fraction));
 
+/* Which display the video window sits on, as an index into the screens the
+   system reports. The menu hides itself when there is only one. */
+void statusbar_set_display_handler(void (*handler)(int index));
+
 /* Invoked when "Disconnect" is chosen. Expected to end the session and leave
    the server advertising. */
 void statusbar_set_disconnect_handler(void (*handler)(void));

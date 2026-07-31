@@ -84,6 +84,7 @@ void video_renderer_set_track_metadata(const char *title, const char *artist, co
 void video_renderer_pause ();
 void video_renderer_hls_ready ();
 void video_renderer_seek(float position);
+void video_renderer_set_display(int index);
 void video_renderer_set_start(float position);
 void video_renderer_resume ();
 int video_renderer_cycle ();

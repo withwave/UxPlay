@@ -845,6 +845,25 @@ static void statusbar_seek_requested(double position) {
     }
 }
 
+/* Which display the video window sits on. Remembered so a window built for the
+   next session opens where the last one was put. */
+static int selected_display_index = -1;
+
+static void statusbar_display_requested(int index) {
+    selected_display_index = index;
+    if (use_video) {
+        video_renderer_set_display(index);
+    }
+}
+
+/* The window is rebuilt per session, so the choice has to be re-applied to it;
+   the sink's own default is "wherever it opened". */
+static void apply_selected_display(void) {
+    if (use_video && selected_display_index >= 0) {
+        video_renderer_set_display(selected_display_index);
+    }
+}
+
 static void statusbar_disconnect_requested(void) {
     /* Same shape as closing the video window: end the session, keep serving. */
     LOGI("Disconnect requested from the menu bar");
@@ -2320,6 +2339,7 @@ extern "C" void video_reset(void *cls, reset_type_t type) {
                                 videosink_options.c_str(), fullscreen, video_sync, h265_support,
                                 render_coverart, playbin_version, NULL);
             video_renderer_start();
+            apply_selected_display();
             close_window = false;  // we already closed the window
         }
         preserve_connections = false; //we already closed all other connections
@@ -3412,6 +3432,7 @@ int main (int argc, char *argv[]) {
                             videosink_options.c_str(), fullscreen, video_sync, h265_support,
                             render_coverart, playbin_version, NULL);
         video_renderer_start();
+        apply_selected_display();
 #ifdef __OpenBSD__
     } else {
         if (pledge("stdio rpath wpath cpath inet unix prot_exec", NULL) == -1) {
@@ -3499,6 +3520,7 @@ int main (int argc, char *argv[]) {
     statusbar_set_volume_handler(statusbar_volume_changed);
     statusbar_set_disconnect_handler(statusbar_disconnect_requested);
     statusbar_set_seek_handler(statusbar_seek_requested);
+    statusbar_set_display_handler(statusbar_display_requested);
     if (use_video) {
         video_renderer_set_key_handler(video_window_key_pressed);
     }
@@ -3536,6 +3558,7 @@ int main (int argc, char *argv[]) {
                                 render_coverart, playbin_version, uri);
             full_video_reset = false;
             video_renderer_start();
+            apply_selected_display();
         }
         if (reset_httpd) {
             unsigned short port = raop_get_port(raop);

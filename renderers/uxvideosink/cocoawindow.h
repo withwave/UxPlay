@@ -82,6 +82,7 @@ struct _GstOSXImage;
     NSPoint panelDragAnchor;
     NSPoint panelOffsetAtAnchor;
     double osdRate;             /* 0 while paused */
+    NSInteger selectedDisplayIndex;  /* -1: wherever the window already is */
 }
 - (void) drawQuad;
 - (void) drawQuadWidth: (int) w height: (int) h;
@@ -100,6 +101,7 @@ struct _GstOSXImage;
 - (void) setPlaybackPosition: (NSNumber *) seconds;
 - (void) setPlaybackDuration: (NSNumber *) seconds;
 - (void) setPlaybackRate: (NSNumber *) rate;
+- (void) setDisplayIndex: (NSNumber *) index;
 - (void) sendControlKey: (const char *) name;
 - (void) setFillMode: (int) mode;
 - (int) fillMode;

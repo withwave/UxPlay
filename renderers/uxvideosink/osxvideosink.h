@@ -91,6 +91,7 @@ struct _GstOSXVideoSink {
   gdouble playback_position;
   gdouble playback_duration;
   gdouble playback_rate;
+  gint display_index;
   gboolean hide_when_windowed;
   GstVideoInfo info;
 };

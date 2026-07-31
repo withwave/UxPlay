@@ -116,6 +116,22 @@ implemented`). 경로는 **DACP** 하나다:
 360 → 560, `MAX_WIDTH` 520 → 600, 간격 52 → 48. 겹치면 히트 테스트가 볼륨을 먼저 보므로 버튼이
 죽는다. 부작용: 창 폭 632px 미만이면 패널이 안 뜬다.
 
+### 메뉴바에서 모니터 선택
+
+메뉴바 메뉴에 `Display` 서브메뉴. 번호 + `localizedName` + 해상도, 현재 선택에 체크. 모니터가
+1대면 항목을 숨긴다.
+
+- **메뉴를 열 때마다 목록을 다시 만든다** (`menuWillOpen:`). 실행 중에 케이블을 뽑거나 뚜껑을 닫으면
+  시작 시점에 만든 목록은 없는 화면을 제시한다. 인덱스도 매번 범위를 확인하고, 벗어나면 "원래 있던
+  화면"으로 되돌린다
+- 경로: 메뉴 → `statusbar_set_display_handler` → `video_renderer_set_display()` → 싱크의 새
+  `display-index` 속성 → `performSelectorOnMainThread`로 `setDisplayIndex:`
+- 의사 전체화면 중이면 새 화면을 덮도록 프레임을 바꾸고, 아니면 크기를 유지한 채 그 화면
+  `visibleFrame` 가운데로 놓는다. `enterPseudoFullScreen`도 이제 선택된 화면을 쓴다 (전에는 창이
+  얹혀 있던 화면)
+- 창은 세션마다 새로 만들어지므로 `video_renderer_start()` 뒤에 선택을 다시 적용한다 (3곳).
+  선택 전에는 `-1`이라 기존 동작 그대로
+
 ### 미해결: 영상이 끝났다는 것을 클라이언트에 알릴 방법
 
 EOS 시 `video_eos_watch_callback`은 `commanded_rate`를 0으로 두고 세션만 유지하며, **클라이언트에게

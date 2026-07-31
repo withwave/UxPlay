@@ -28,6 +28,9 @@ static void (*seek_handler)(double) = NULL;
 static statusbar_state_t current_state = STATUSBAR_IDLE;
 static NSString *client_name = nil;
 static NSString *client_model = nil;
+static NSMenuItem *display_item = nil;
+static void (*display_handler)(int index) = NULL;
+static NSInteger selected_display = -1;
 
 /* UxPlay's main() runs on a worker thread under the gst_macos_main wrapper, so
    nothing here may touch AppKit directly. */
@@ -57,11 +60,15 @@ run_on_main (dispatch_block_t block)
 }
 @end
 
-@interface UxPlayStatusTarget : NSObject
+static void rebuild_display_menu (id target);
+
+@interface UxPlayStatusTarget : NSObject <NSMenuDelegate>
 - (void) quit: (id) sender;
 - (void) disconnect: (id) sender;
 - (void) volumeChanged: (id) sender;
 - (void) progressChanged: (id) sender;
+- (void) displayChosen: (id) sender;
+- (void) menuWillOpen: (NSMenu *) menu;
 @end
 
 @implementation UxPlayStatusTarget
@@ -75,6 +82,24 @@ run_on_main (dispatch_block_t block)
 {
     if (disconnect_handler != NULL) {
         disconnect_handler ();
+    }
+}
+
+/* Displays come and go while UxPlay runs, so the list is built at the moment
+   the menu is asked for rather than once at startup. */
+- (void) menuWillOpen: (NSMenu *) menu
+{
+    rebuild_display_menu (self);
+}
+
+/* The tag carries the index into [NSScreen screens]. */
+- (void) displayChosen: (id) sender
+{
+    NSMenuItem *item = (NSMenuItem *) sender;
+
+    selected_display = [item tag];
+    if (display_handler != NULL) {
+        display_handler ((int) selected_display);
     }
 }
 
@@ -247,6 +272,47 @@ refresh (void)
     [disconnect_item setEnabled: connected];
 }
 
+/* Rebuilt each time the menu is about to open: displays are attached and
+   removed while UxPlay runs, and a list built once at startup would offer a
+   screen that is no longer there. */
+static void
+rebuild_display_menu (id target)
+{
+    NSArray *screens = [NSScreen screens];
+    NSMenu *submenu = [[NSMenu alloc] initWithTitle: @"Display"];
+    NSUInteger i;
+
+    if (selected_display >= (NSInteger) [screens count]) {
+        selected_display = -1;
+    }
+    for (i = 0; i < [screens count]; i++) {
+        NSScreen *screen = [screens objectAtIndex: i];
+        NSRect frame = [screen frame];
+        NSString *name = nil;
+        NSMenuItem *item;
+
+        if ([screen respondsToSelector: @selector(localizedName)]) {
+            name = [screen localizedName];
+        }
+        if (name == nil || [name length] == 0) {
+            name = [NSString stringWithFormat: @"Display %lu", (unsigned long) (i + 1)];
+        }
+        item = [submenu addItemWithTitle:
+                    [NSString stringWithFormat: @"%lu. %@  (%.0f x %.0f)",
+                        (unsigned long) (i + 1), name, frame.size.width, frame.size.height]
+                                  action: @selector(displayChosen:)
+                           keyEquivalent: @""];
+        [item setTarget: target];
+        [item setTag: (NSInteger) i];
+        [item setState: (selected_display == (NSInteger) i) ? NSControlStateValueOn
+                                                            : NSControlStateValueOff];
+    }
+    [display_item setSubmenu: submenu];
+    [submenu release];
+    /* One display is no choice at all. */
+    [display_item setHidden: ([screens count] < 2)];
+}
+
 void
 statusbar_init (void)
 {
@@ -332,6 +398,14 @@ statusbar_init (void)
                                                keyEquivalent: @""];
             [volume_item setView: row];
         }
+
+        [menu addItem: [NSMenuItem separatorItem]];
+
+        display_item = [menu addItemWithTitle: @"Display"
+                                       action: nil
+                                keyEquivalent: @""];
+        rebuild_display_menu (target);
+        [menu setDelegate: target];
 
         [menu addItem: [NSMenuItem separatorItem]];
 
@@ -473,6 +547,12 @@ statusbar_set_volume (double fraction)
             [volume_slider setDoubleValue: fraction];
         }
     });
+}
+
+void
+statusbar_set_display_handler (void (*handler)(int index))
+{
+    display_handler = handler;
 }
 
 void

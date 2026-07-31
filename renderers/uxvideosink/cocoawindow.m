@@ -378,6 +378,9 @@ const gchar* gst_keycode_to_keyname(gint16 keycode)
   /* Until the first report arrives; starting at zero drew an empty slider over
      a stream that was playing at full volume. */
   osdVolume = 1.0f;
+  /* Until the menu bar names one; the window keeps whatever display it opened
+     on. */
+  selectedDisplayIndex = -1;
   data = nil;
   width = frame.size.width * [[NSScreen mainScreen] backingScaleFactor];
   height = frame.size.height * [[NSScreen mainScreen] backingScaleFactor];
@@ -749,6 +752,53 @@ osd_fill_round_rect (float x, float y, float w, float h, float r)
 {
   osdRate = [rate doubleValue];
   [self setNeedsDisplay: YES];
+}
+
+/* The display the video belongs on: the one chosen from the menu bar if it is
+   still attached, otherwise wherever the window already is. Screens come and go
+   -- a lid closing, a cable pulled -- so the index is re-checked every time
+   rather than trusted. */
+- (NSScreen *) targetScreen
+{
+  NSArray *screens = [NSScreen screens];
+
+  if (selectedDisplayIndex >= 0 && selectedDisplayIndex < (NSInteger) [screens count]) {
+    return [screens objectAtIndex: selectedDisplayIndex];
+  }
+  return [[self window] screen] ? [[self window] screen] : [NSScreen mainScreen];
+}
+
+- (void) setDisplayIndex: (NSNumber *) index
+{
+  NSWindow *win = [self window];
+  NSScreen *screen;
+  NSRect frame, visible;
+
+  selectedDisplayIndex = [index integerValue];
+  if (win == nil) {
+    return;
+  }
+  screen = [self targetScreen];
+  if (pseudoFullScreen) {
+    /* Already covering a screen: cover the new one instead. */
+    [win setFrame: [screen frame] display: YES];
+    [win makeKeyAndOrderFront: nil];
+    return;
+  }
+  /* Keep the window's size and put it in the middle of the chosen display,
+     clamped to the part of it that is actually usable. */
+  visible = [screen visibleFrame];
+  frame = [win frame];
+  if (frame.size.width > visible.size.width) {
+    frame.size.width = visible.size.width;
+  }
+  if (frame.size.height > visible.size.height) {
+    frame.size.height = visible.size.height;
+  }
+  frame.origin.x = NSMinX (visible) + round ((visible.size.width - frame.size.width) / 2.0);
+  frame.origin.y = NSMinY (visible) + round ((visible.size.height - frame.size.height) / 2.0);
+  [win setFrame: frame display: YES];
+  [win makeKeyAndOrderFront: nil];
 }
 
 /* Layout of the transport panel, shaped after the controls macOS puts on
@@ -1461,11 +1511,14 @@ restore:
    the window on the very next line. */
 - (void) enterPseudoFullScreen {
   NSWindow *win = [self window];
-  NSScreen *screen = [win screen] ? [win screen] : [NSScreen mainScreen];
+  NSScreen *screen;
 
   if (win == nil || pseudoFullScreen) {
     return;
   }
+  /* Fills the display chosen from the menu bar, not whichever one the window
+     happens to be sitting on. */
+  screen = [self targetScreen];
   savedWindowFrame = [win frame];
   savedStyleMask = [win styleMask];
   pseudoFullScreen = YES;

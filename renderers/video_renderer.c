@@ -833,6 +833,11 @@ void video_renderer_set_commanded_rate(float rate) {
     }
 }
 
+/* Which display the video window sits on. -1 leaves it where it is. */
+void video_renderer_set_display(int index) {
+    video_renderer_set_sink_property("display-index", (gint) index, NULL);
+}
+
 void video_renderer_set_stream_active(bool active) {
     video_renderer_set_sink_property("stream-active", (gboolean) active, NULL);
 }

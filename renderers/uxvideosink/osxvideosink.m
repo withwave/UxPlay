@@ -79,6 +79,7 @@ enum
   ARG_PLAYBACK_POSITION,
   ARG_PLAYBACK_DURATION,
   ARG_PLAYBACK_RATE,
+  ARG_DISPLAY_INDEX,
 };
 
 static void gst_osx_video_sink_osxwindow_destroy (GstOSXVideoSink * osxvideosink);
@@ -429,6 +430,16 @@ gst_osx_video_sink_set_property (GObject * object, guint prop_id,
                           waitUntilDone: NO];
       }
       break;
+    case ARG_DISPLAY_INDEX:
+      osxvideosink->display_index = g_value_get_int (value);
+      if (osxvideosink->osxwindow && osxvideosink->osxwindow->gstview) {
+        [osxvideosink->osxwindow->gstview
+            performSelectorOnMainThread: @selector(setDisplayIndex:)
+                             withObject: [NSNumber numberWithInt:
+                                 osxvideosink->display_index]
+                          waitUntilDone: NO];
+      }
+      break;
     case ARG_PLAYBACK_RATE:
       osxvideosink->playback_rate = g_value_get_double (value);
       if (osxvideosink->osxwindow && osxvideosink->osxwindow->gstview) {
@@ -495,6 +506,9 @@ gst_osx_video_sink_get_property (GObject * object, guint prop_id,
       break;
     case ARG_PLAYBACK_DURATION:
       g_value_set_double (value, osxvideosink->playback_duration);
+      break;
+    case ARG_DISPLAY_INDEX:
+      g_value_set_int (value, osxvideosink->display_index);
       break;
     case ARG_PLAYBACK_RATE:
       g_value_set_double (value, osxvideosink->playback_rate);
@@ -654,6 +668,12 @@ gst_osx_video_sink_class_init (GstOSXVideoSinkClass * klass)
           "the window. Needed because the pipeline is not always torn down "
           "when the client goes away",
           TRUE, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+
+  g_object_class_install_property (gobject_class, ARG_DISPLAY_INDEX,
+      g_param_spec_int ("display-index", "display index",
+          "Which screen the window sits on, as an index into the displays "
+          "the system reports. -1 leaves it wherever it is",
+          -1, 64, -1, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 }
 
 static void

@@ -116,17 +116,31 @@ static void statusbar_update(statusbar_state_t state) {
     }
 }
 
+/* A client opens several connections over a session -- pair-verify, the
+   reverse event channel, the one polling playback-info -- and each of them
+   reaches conn_init(). Only the first tells us anything; letting the later
+   ones through would drop an established video session back to the
+   provisional audio state part-way through playback. */
+static void statusbar_note_connection(void) {
+    if (statusbar_state == STATUSBAR_IDLE) {
+        statusbar_update(STATUSBAR_AUDIO);
+    }
+}
+
 /* The slider carries the same 0.0 - 1.0 fraction the AirPlay volume control
    uses, rescaled to GStreamer's linear scale the same way audio_set_volume()
    does, so dragging it lands where the client's own slider would. */
 static void statusbar_volume_changed(double fraction);
 static void statusbar_disconnect_requested(void);
 static void video_window_key_pressed(const char *key);
+static void statusbar_seek_requested(double position);
 /* Last known position of the AirPlay volume slider, so the arrow keys have
    something to step from. */
 static double volume_fraction = 1.0;
 #else
 #define statusbar_update(state) ((void) 0)
+#define statusbar_note_connection() ((void) 0)
+#define statusbar_set_progress(position, duration) ((void) 0)
 #endif
 static bool reset_loop = false;
 static unsigned int open_connections= 0;
@@ -717,7 +731,14 @@ static void statusbar_volume_changed(double fraction) {
     }
     audio_renderer_set_volume(gst_volume);
     video_renderer_hls_set_volume(gst_volume);
+    if (use_video) {
+        video_renderer_show_volume(fraction);
+    }
 }
+
+/* Where the stream was the last time the client asked, so the transport
+   buttons drawn over the video have something to skip from. */
+static double last_playback_position = 0.0;
 
 /* The arrow keys step by 1/16, which is the granularity of the AirPlay volume
    control itself, so the two stay on the same notches. */
@@ -731,6 +752,36 @@ static void video_window_key_pressed(const char *key) {
        way to reach us. */
     if (!strcmp(key, "uxplay-disconnect")) {
         statusbar_disconnect_requested();
+        return;
+    }
+    /* The transport panel drawn over the video reports its controls the same
+       way, since the key channel is already carrying window input to us. */
+    if (!strncmp(key, "uxplay-seek:", 12)) {
+        video_renderer_seek((float) atof(key + 12));
+        return;
+    }
+    if (!strncmp(key, "uxplay-volume:", 14)) {
+        double fraction = atof(key + 14);
+        statusbar_volume_changed(fraction);
+        statusbar_set_volume(fraction);
+        return;
+    }
+    if (!strncmp(key, "uxplay-skip:", 12)) {
+        double target = last_playback_position + atof(key + 12);
+        if (target < 0.0) {
+            target = 0.0;
+        }
+        video_renderer_seek((float) target);
+        return;
+    }
+    if (!strcmp(key, "uxplay-playpause")) {
+        if (video_renderer_is_paused()) {
+            video_renderer_resume();
+            video_renderer_set_commanded_rate(1.0f);
+        } else {
+            video_renderer_pause();
+            video_renderer_set_commanded_rate(0.0f);
+        }
         return;
     }
     if (!use_audio) {
@@ -751,6 +802,14 @@ static void video_window_key_pressed(const char *key) {
     statusbar_volume_changed(target);
     statusbar_set_volume(target);
     video_renderer_show_volume(target);
+}
+
+/* Only HLS has a timeline to seek along; mirroring reports no duration and the
+   menu hides the row. */
+static void statusbar_seek_requested(double position) {
+    if (use_video) {
+        video_renderer_seek((float) position);
+    }
 }
 
 static void statusbar_disconnect_requested(void) {
@@ -2319,9 +2378,10 @@ extern "C" void export_dacp(void *cls, const char *active_remote, const char *da
 extern "C" void conn_init (void *cls) {
     open_connections++;
     LOGD("Open connections: %i", open_connections);
-    /* Provisional: an AirPlay Audio session never goes further than this, a
-       mirroring one is upgraded once video frames start arriving. */
-    statusbar_update(STATUSBAR_AUDIO);
+    /* Provisional: an AirPlay Audio session never goes further than this; a
+       mirroring one is upgraded once video frames start arriving, an HLS one
+       when the client asks us to play. */
+    statusbar_note_connection();
     //video_renderer_update_background(1);
 }
 
@@ -2335,8 +2395,16 @@ extern "C" void conn_destroy (void *cls) {
         statusbar_set_client(NULL, NULL);
 #endif
         if (use_video) {
+            /* A client that hands the stream to another AirPlay device just
+               tears the session down; it never sends /stop. Without this the
+               HLS pipeline kept playing to nobody, and coming back started a
+               second one over the top of it. */
+            video_renderer_hls_ready();
             video_renderer_set_stream_active(false);
+            video_renderer_set_playback_info(0.0, 0.0, 0.0);
+            last_playback_position = 0.0;
         }
+        statusbar_set_progress(0.0, 0.0);
         remote_clock_offset = 0;
         if (use_audio) {
             audio_renderer_stop();
@@ -2531,6 +2599,11 @@ extern "C" void audio_set_volume (void *cls, float volume) {
 #ifdef __APPLE__
     volume_fraction = frac;
     statusbar_set_volume(frac);
+    /* The panel drawn over the video reads its level from the sink, so a volume
+       change made on the client has to be pushed there too or the two drift. */
+    if (use_video) {
+        video_renderer_show_volume(frac);
+    }
 #endif
     /* frac is length of volume slider as fraction of max length */
     /* also (steps/16) where steps is number of discrete steps above mute (16 = full volume) */
@@ -2711,8 +2784,15 @@ extern "C" bool check_register(void *cls, const char *client_pk) {
 /* control  callbacks for video player (unimplemented) */
 
 extern "C" void on_video_play(void *cls, const char* location, const float start_position) {
+    /* Whatever was playing before stops here, so a second /play cannot end up
+       running alongside the first. */
+    video_renderer_hls_ready();
     /* start_position needs to be implemented */
     video_renderer_set_start(start_position);
+    /* HLS goes through neither video_process() nor audio_process(), so without
+       this the menu bar sits at "waiting for a client" throughout playback and
+       the progress row never appears. */
+    statusbar_update(STATUSBAR_VIDEO);
     url.erase();
     url.append(location);
     relaunch_video = true;
@@ -2754,6 +2834,10 @@ extern "C" float on_video_playlist_remove (void *cls) {
 
  extern "C" void on_video_stop(void *cls) {
     LOGI("**************************on_video_stop\n");
+    /* The client usually stays connected after stopping a video, so fall back
+       to the provisional state rather than claiming nobody is there. */
+    statusbar_update(open_connections ? STATUSBAR_AUDIO : STATUSBAR_IDLE);
+    statusbar_set_progress(0.0, 0.0);
     video_renderer_hls_ready();
  }
 
@@ -2773,6 +2857,14 @@ extern "C" void on_video_acquire_playback_info (void *cls, playback_info_t *play
                                                  &playback_info->playback_buffer_full);
     playback_info->ready_to_play = true; //?
     playback_info->playback_likely_to_keep_up = true; //?
+#ifdef __APPLE__
+    statusbar_set_progress(playback_info->position, playback_info->duration);
+#endif
+    if (use_video) {
+        last_playback_position = playback_info->position;
+        video_renderer_set_playback_info(playback_info->position, playback_info->duration,
+                                         playback_info->rate);
+    }
     
 #ifdef DBUS
     /*  this seems to be  called every second for first 900 secs (15 mins?) of HLS video, and subsequently
@@ -3364,6 +3456,7 @@ int main (int argc, char *argv[]) {
     statusbar_init();
     statusbar_set_volume_handler(statusbar_volume_changed);
     statusbar_set_disconnect_handler(statusbar_disconnect_requested);
+    statusbar_set_seek_handler(statusbar_seek_requested);
     if (use_video) {
         video_renderer_set_key_handler(video_window_key_pressed);
     }

@@ -18,6 +18,27 @@
 
 
 //produces the fcup request plist in xml format as a null-terminated string
+/* The reverse connection carries both FCUP requests and playback state events,
+   written from different threads with nothing keeping them apart. Interleaved
+   writes leave the client unable to match responses to requests, and its
+   control channel then stops talking to us -- it quits sending the feedback we
+   watch for, and the session gets dropped for going quiet. One lock covers
+   every write to that socket. */
+static mutex_handle_t reverse_write_mutex;
+static bool reverse_write_mutex_ready = false;
+
+static void reverse_write_lock(void) {
+    if (!reverse_write_mutex_ready) {
+        MUTEX_CREATE(reverse_write_mutex);
+        reverse_write_mutex_ready = true;
+    }
+    MUTEX_LOCK(reverse_write_mutex);
+}
+
+static void reverse_write_unlock(void) {
+    MUTEX_UNLOCK(reverse_write_mutex);
+}
+
 char *create_fcup_request(const char *url, int request_id, const char *client_session_id, int *datalen) {
     char *plist_xml = NULL;
     /* values taken from apsdk-public;  */
@@ -73,10 +94,21 @@ char *create_fcup_request(const char *url, int request_id, const char *client_se
    that paused itself before scrubbing never learns that the seek finished and
    playback resumed, so it sits showing stopped however healthy the stream is.
    state is one of "loading", "playing", "paused" or "stopped". */
-int playback_state_event(void *conn_opaque, const char *state, const char *client_session_id) {
+int playback_state_event(raop_t *raop, const char *state, const char *client_session_id) {
 
-    raop_conn_t *conn = (raop_conn_t *) conn_opaque;
-    raop_t *raop = conn->raop;
+    /* Only on a real change. A drag on the client's scrubber arrives as a
+       stream of /scrub requests, and announcing the same state for every one of
+       them floods the reverse connection -- which also carries FCUP requests
+       and has no ordering between the two. The client's control channel gave up
+       under that, stopping the feedback it owes us, and the session was then
+       dropped for going quiet. */
+    static char last_state[16] = "";
+    if (!strncmp(last_state, state, sizeof(last_state) - 1)) {
+        return 0;
+    }
+    strncpy(last_state, state, sizeof(last_state) - 1);
+    last_state[sizeof(last_state) - 1] = '\0';
+
     int requestlen = 0;
     uint32_t datalen = 0;
     char *plist_xml = NULL;
@@ -102,7 +134,9 @@ int playback_state_event(void *conn_opaque, const char *state, const char *clien
     free(plist_xml);
 
     const char *http_request = http_response_get_data(request, &requestlen);
+    reverse_write_lock();
     int send_len = send(socket_fd, http_request, requestlen, 0);
+    reverse_write_unlock();
     http_response_destroy(request);
     if (send_len < 0) {
         logger_log(raop->logger, LOGGER_ERR, "playback_state_event: send error");
@@ -136,7 +170,9 @@ int fcup_request(void *conn_opaque, const char *media_url, const char *client_se
     free(plist_xml);
 
     const char *http_request = http_response_get_data(request, &requestlen); 
+    reverse_write_lock();
     int send_len = send(socket_fd, http_request, requestlen, 0);
+    reverse_write_unlock();
     if (send_len < 0) {
         int sock_err = SOCKET_GET_ERROR();
 	logger_log(raop->logger, LOGGER_ERR, "fcup_request: send  error %d:%s\n",

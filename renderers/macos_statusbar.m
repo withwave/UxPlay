@@ -14,10 +14,16 @@ static NSMenuItem *state_item = nil;
 static NSMenuItem *track_item = nil;
 static NSMenuItem *disconnect_item = nil;
 static NSSlider *volume_slider = nil;
+static NSMenuItem *progress_item = nil;
+static NSSlider *progress_slider = nil;
+static NSTextField *progress_label = nil;
+static double progress_duration = 0.0;
+static BOOL progress_dragging = NO;
 
 static NSString *track_text = nil;
 static void (*volume_handler)(double) = NULL;
 static void (*disconnect_handler)(void) = NULL;
+static void (*seek_handler)(double) = NULL;
 
 static statusbar_state_t current_state = STATUSBAR_IDLE;
 static NSString *client_name = nil;
@@ -35,10 +41,27 @@ run_on_main (dispatch_block_t block)
     }
 }
 
+/* A plain NSView handed to a menu item gets a slice of the menu's backing
+   store that nothing initialises and no menu material composited underneath,
+   so whatever happened to be there shows through -- a black wedge across the
+   menu's rounded background, with only the controls that draw themselves
+   (the sliders) coming out right. Vibrancy is what makes AppKit put the menu's
+   own material behind the row. */
+@interface UxPlayMenuRow : NSView
+@end
+
+@implementation UxPlayMenuRow
+- (BOOL) allowsVibrancy
+{
+    return YES;
+}
+@end
+
 @interface UxPlayStatusTarget : NSObject
 - (void) quit: (id) sender;
 - (void) disconnect: (id) sender;
 - (void) volumeChanged: (id) sender;
+- (void) progressChanged: (id) sender;
 @end
 
 @implementation UxPlayStatusTarget
@@ -61,9 +84,43 @@ run_on_main (dispatch_block_t block)
         volume_handler ([(NSSlider *) sender doubleValue]);
     }
 }
+
+- (void) progressChanged: (id) sender
+{
+    NSSlider *slider = (NSSlider *) sender;
+
+    /* While the knob is held, keep the position updates that arrive every
+       second from yanking it back out from under the pointer. */
+    progress_dragging = ([[NSApp currentEvent] type] == NSEventTypeLeftMouseDown ||
+                         [[NSApp currentEvent] type] == NSEventTypeLeftMouseDragged);
+    if (!progress_dragging && seek_handler != NULL) {
+        seek_handler ([slider doubleValue]);
+    }
+}
 @end
 
 static UxPlayStatusTarget *target = nil;
+static dispatch_source_t open_menu_signal = nil;
+
+/* A slider squeezed into a frame shorter than the control's own metrics has
+   its rounded track and knob clipped, which is what left the gauge looking
+   broken. Let the control size itself vertically, keep the width we want, and
+   centre it in the row. */
+static void
+place_slider (NSSlider *slider, NSView *row, CGFloat x, CGFloat width,
+    CGFloat centre_y)
+{
+    NSRect f;
+
+    [slider sizeToFit];
+    f = [slider frame];
+    f.origin.x = x;
+    f.size.width = width;
+    f.origin.y = round (centre_y - f.size.height / 2.0);
+    [slider setFrame: f];
+    [slider setAutoresizingMask: NSViewWidthSizable];
+    [row addSubview: slider];
+}
 
 /* Must run on the main thread. */
 static void
@@ -72,6 +129,7 @@ refresh (void)
     NSString *state_text;
     NSString *symbol;
     BOOL connected = (current_state != STATUSBAR_IDLE);
+    BOOL coloured = NO;
 
     if (status_item == nil) {
         return;
@@ -85,6 +143,10 @@ refresh (void)
     case STATUSBAR_AUDIO:
         state_text = @"Streaming audio";
         symbol = @"airplayaudio";
+        break;
+    case STATUSBAR_VIDEO:
+        state_text = @"Playing video";
+        symbol = @"airplayvideo";
         break;
     case STATUSBAR_IDLE:
     default:
@@ -101,13 +163,41 @@ refresh (void)
         if (image != nil) {
             /* Sizing the symbol from the bar's thickness is what keeps it
                vertically centred; left unconfigured it uses its own metrics
-               and sits high. */
-            CGFloat points = [[NSStatusBar systemStatusBar] thickness] * 0.62;
-            NSImage *sized = [image imageWithSymbolConfiguration:
-                [NSImageSymbolConfiguration configurationWithPointSize: points
-                                                                weight: NSFontWeightRegular]];
+               and sits high. Round it: this menu bar draws one pixel per
+               point, so a fractional size puts the symbol's one-pixel strokes
+               on half pixels and the rounded rectangle comes back with its
+               corners chewed off and gaps along the edges. */
+            CGFloat points = floor ([[NSStatusBar systemStatusBar] thickness] * 0.62);
+            NSImageSymbolConfiguration *config = [NSImageSymbolConfiguration
+                configurationWithPointSize: points weight: NSFontWeightRegular];
+
+            /* Colouring the symbol through its own configuration leaves the
+               vector artwork intact. Drawing it into a bitmap to tint it
+               rasterised it once at 1x, so on a Retina menu bar the rounded
+               rectangle came out ragged. */
+            if (connected && [NSImageSymbolConfiguration respondsToSelector:
+                    @selector(configurationWithHierarchicalColor:)]) {
+                NSImageSymbolConfiguration *colour = [NSImageSymbolConfiguration
+                    configurationWithHierarchicalColor: [NSColor systemBlueColor]];
+                NSImageSymbolConfiguration *both =
+                    [config configurationByApplyingConfiguration: colour];
+
+                if (both != nil) {
+                    config = both;
+                    coloured = YES;
+                }
+            }
+
+            NSImage *sized = [image imageWithSymbolConfiguration: config];
             if (sized != nil) {
+                NSSize s = [sized size];
+
+                /* Same reason: the button centres the image in its bounds, so
+                   a fractional size lands the artwork on a half pixel. */
+                [sized setSize: NSMakeSize (round (s.width), round (s.height))];
                 image = sized;
+            } else {
+                coloured = NO;
             }
         }
     }
@@ -115,26 +205,30 @@ refresh (void)
     NSStatusBarButton *button = [status_item button];
 
     if (image != nil) {
-        if (connected) {
-            /* A template image is drawn in the menu bar's own colour whatever
-               the button's tint says, so the colour has to be burnt into a
-               non-template copy instead. */
-            NSImage *tinted = [[image copy] autorelease];
+        if (connected && !coloured) {
+            /* Older systems have no colour configuration to apply. A template
+               image is drawn in the menu bar's own colour whatever the
+               button's tint says, so tint it by hand -- but through a drawing
+               handler, which redraws at whatever scale the screen asks for
+               instead of freezing the symbol into a 1x bitmap. */
+            NSImage *plain = image;
+            NSSize size = [plain size];
 
-            [tinted setTemplate: NO];
-            [tinted lockFocus];
-            [[NSColor systemBlueColor] set];
-            NSRectFillUsingOperation (NSMakeRect (0, 0, [tinted size].width,
-                    [tinted size].height), NSCompositingOperationSourceAtop);
-            [tinted unlockFocus];
-            image = tinted;
-        } else {
-            [image setTemplate: YES];
+            image = [NSImage imageWithSize: size flipped: NO
+                             drawingHandler: ^BOOL (NSRect rect) {
+                [plain drawInRect: rect];
+                [[NSColor systemBlueColor] set];
+                NSRectFillUsingOperation (rect, NSCompositingOperationSourceAtop);
+                return YES;
+            }];
         }
+        [image setTemplate: !connected];
         [button setImage: image];
         [button setTitle: @""];
         [button setImagePosition: NSImageOnly];
-        [button setImageScaling: NSImageScaleProportionallyDown];
+        /* Scaling here would resample what the symbol configuration already
+           sized correctly, which is what broke the outline. */
+        [button setImageScaling: NSImageScaleNone];
     } else {
         [button setTitle: connected ? @"\U0001F535" : @"\U000026AA"];
     }
@@ -180,10 +274,43 @@ statusbar_init (void)
 
         [menu addItem: [NSMenuItem separatorItem]];
 
+        {
+            NSView *row = [[[UxPlayMenuRow alloc] initWithFrame:
+                NSMakeRect (0, 0, 220, 46)] autorelease];
+
+            [row setAutoresizesSubviews: YES];
+            [row setWantsLayer: YES];
+
+            progress_label = [NSTextField labelWithString: @"0:00 / 0:00"];
+            [progress_label setFrame: NSMakeRect (14, 26, 192, 16)];
+            [progress_label setFont: [NSFont menuFontOfSize: 0]];
+            [progress_label setAlignment: NSTextAlignmentCenter];
+            [row addSubview: progress_label];
+
+            progress_slider = [[NSSlider alloc] initWithFrame:
+                NSMakeRect (14, 4, 192, 21)];
+            [progress_slider setMinValue: 0.0];
+            [progress_slider setMaxValue: 1.0];
+            [progress_slider setDoubleValue: 0.0];
+            [progress_slider setTarget: target];
+            [progress_slider setAction: @selector(progressChanged:)];
+            [progress_slider setContinuous: YES];
+            place_slider (progress_slider, row, 14, 192, 14);
+
+            progress_item = [menu addItemWithTitle: @"" action: nil keyEquivalent: @""];
+            [progress_item setView: row];
+            [progress_item setHidden: YES];
+        }
+
+        [menu addItem: [NSMenuItem separatorItem]];
+
         /* A slider needs a view of its own; a plain menu item cannot hold one. */
         {
-            NSView *row = [[[NSView alloc] initWithFrame:
+            NSView *row = [[[UxPlayMenuRow alloc] initWithFrame:
                 NSMakeRect (0, 0, 220, 32)] autorelease];
+
+            [row setAutoresizesSubviews: YES];
+            [row setWantsLayer: YES];
             NSTextField *label = [NSTextField labelWithString: @"Volume"];
 
             [label setFrame: NSMakeRect (14, 7, 56, 18)];
@@ -191,14 +318,14 @@ statusbar_init (void)
             [row addSubview: label];
 
             volume_slider = [[NSSlider alloc] initWithFrame:
-                NSMakeRect (74, 6, 132, 20)];
+                NSMakeRect (74, 6, 132, 21)];
             [volume_slider setMinValue: 0.0];
             [volume_slider setMaxValue: 1.0];
             [volume_slider setDoubleValue: 1.0];
             [volume_slider setTarget: target];
             [volume_slider setAction: @selector(volumeChanged:)];
             [volume_slider setContinuous: YES];
-            [row addSubview: volume_slider];
+            place_slider (volume_slider, row, 74, 132, 16);
 
             NSMenuItem *volume_item = [menu addItemWithTitle: @""
                                                       action: nil
@@ -217,8 +344,20 @@ statusbar_init (void)
                          action: @selector(quit:)
                   keyEquivalent: @"q"] setTarget: target];
 
+        /* The AirPlay symbols are wider than they are tall, so a square item
+           would squeeze them -- and squeezing means resampling. */
+        /* SIGUSR1 opens the menu, so the UI can be inspected without a
+           hand on the mouse. */
+        signal (SIGUSR1, SIG_IGN);
+        open_menu_signal = dispatch_source_create (DISPATCH_SOURCE_TYPE_SIGNAL,
+            SIGUSR1, 0, dispatch_get_main_queue ());
+        dispatch_source_set_event_handler (open_menu_signal, ^{
+            [[status_item button] performClick: nil];
+        });
+        dispatch_resume (open_menu_signal);
+
         status_item = [[[NSStatusBar systemStatusBar]
-            statusItemWithLength: NSSquareStatusItemLength] retain];
+            statusItemWithLength: NSVariableStatusItemLength] retain];
         [status_item setMenu: menu];
 
         refresh ();
@@ -285,6 +424,47 @@ statusbar_set_metadata (const char *title, const char *artist)
     });
 }
 
+/* m:ss, or h:mm:ss once past an hour. */
+static NSString *
+clock_string (double seconds)
+{
+    long total = (long) (seconds < 0.0 ? 0.0 : seconds);
+
+    if (total >= 3600) {
+        return [NSString stringWithFormat: @"%ld:%02ld:%02ld",
+            total / 3600, (total % 3600) / 60, total % 60];
+    }
+    return [NSString stringWithFormat: @"%ld:%02ld", total / 60, total % 60];
+}
+
+void
+statusbar_set_progress (double position, double duration)
+{
+    run_on_main (^{
+        progress_duration = duration;
+        if (duration <= 0.0) {
+            [progress_item setHidden: YES];
+            return;
+        }
+        [progress_item setHidden: NO];
+        [progress_slider setMaxValue: duration];
+        if (!progress_dragging) {
+            [progress_slider setDoubleValue: position];
+        }
+        [progress_label setStringValue:
+            [NSString stringWithFormat: @"%@ / %@",
+                clock_string (progress_dragging ?
+                    [progress_slider doubleValue] : position),
+                clock_string (duration)]];
+    });
+}
+
+void
+statusbar_set_seek_handler (void (*handler)(double position))
+{
+    seek_handler = handler;
+}
+
 void
 statusbar_set_volume (double fraction)
 {
@@ -322,6 +502,10 @@ statusbar_destroy (void)
         disconnect_item = nil;
         [volume_slider release];
         volume_slider = nil;
+        [progress_slider release];
+        progress_slider = nil;
+        progress_item = nil;
+        progress_label = nil;
         [track_text release];
         track_text = nil;
         [target release];

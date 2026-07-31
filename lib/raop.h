@@ -139,6 +139,11 @@ RAOP_API void raop_stop_httpd(raop_t *raop);
 RAOP_API void raop_set_dnssd(raop_t *raop, dnssd_t *dnssd);
 RAOP_API void raop_destroy(raop_t *raop);
 RAOP_API void raop_remove_known_connections(raop_t * raop);
+
+/* Tells a connected client that playback has ended. Sent before the server goes
+   away so the client releases the session instead of being cut off mid-stream,
+   which leaves its player stuck until the app is restarted. */
+RAOP_API void raop_announce_playback_stopped(raop_t *raop);
 RAOP_API void raop_remove_hls_connections(raop_t * raop);
 RAOP_API void raop_destroy_airplay_video(raop_t *raop, int id);
 RAOP_API void raop_playlist_remove(raop_t *raop, void *airplay_video, float position);

@@ -23,6 +23,7 @@ typedef enum {
     STATUSBAR_IDLE = 0,     /* no client */
     STATUSBAR_AUDIO,        /* AirPlay Audio: no video window exists */
     STATUSBAR_MIRROR,       /* AirPlay Mirror */
+    STATUSBAR_VIDEO,        /* AirPlay Video: HLS stream with a timeline */
 } statusbar_state_t;
 
 /* Creates the menu bar item. Safe to call more than once. */
@@ -47,6 +48,13 @@ void statusbar_set_volume_handler(void (*handler)(double fraction));
 /* Invoked when "Disconnect" is chosen. Expected to end the session and leave
    the server advertising. */
 void statusbar_set_disconnect_handler(void (*handler)(void));
+
+/* Playback progress, in seconds. A duration of 0 means the media is not
+   seekable -- mirroring has no timeline -- and the row is hidden. */
+void statusbar_set_progress(double position, double duration);
+
+/* Invoked when the progress slider is dragged, with a position in seconds. */
+void statusbar_set_seek_handler(void (*handler)(double position));
 
 void statusbar_destroy(void);
 

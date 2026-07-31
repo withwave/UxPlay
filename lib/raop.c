@@ -849,6 +849,14 @@ raop_stop_httpd(raop_t *raop) {
     httpd_stop(raop->httpd);
 }
 
+void raop_announce_playback_stopped(raop_t *raop) {
+    assert(raop);
+    airplay_video_t *airplay_video = (airplay_video_t *) hls_get_current_video(raop);
+    if (airplay_video) {
+        playback_state_event(raop, "stopped", get_apple_session_id(airplay_video));
+    }
+}
+
 void raop_remove_known_connections(raop_t * raop) {
     httpd_remove_known_connections(raop->httpd);
 }

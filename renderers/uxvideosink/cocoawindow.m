@@ -375,6 +375,9 @@ const gchar* gst_keycode_to_keyname(gint16 keycode)
   glClearColor (0.0, 0.0, 0.0, 0.0);
 
   pi_texture = 0;
+  /* Until the first report arrives; starting at zero drew an empty slider over
+     a stream that was playing at full volume. */
+  osdVolume = 1.0f;
   data = nil;
   width = frame.size.width * [[NSScreen mainScreen] backingScaleFactor];
   height = frame.size.height * [[NSScreen mainScreen] backingScaleFactor];
@@ -457,18 +460,32 @@ const gchar* gst_keycode_to_keyname(gint16 keycode)
 
   [actualContext makeCurrentContext];
 
-  /* Free previous texture if any */
+  /* Hold on to the outgoing texture: it still holds the last frame shown, and
+     re-initialising happens on a seek, where the picture should stay put until
+     the new frame decodes rather than blink. */
+  if (prevTexture) {
+    glDeleteTextures (1, (GLuint *) &prevTexture);
+    prevTexture = 0;
+  }
   if (pi_texture) {
-    glDeleteTextures (1, (GLuint *)&pi_texture);
+    prevTexture = pi_texture;
+    prevWidth = allocWidth;
+    prevHeight = allocHeight;
+    pi_texture = 0;
+    awaitingFirstFrame = YES;
   }
 
-  /* Always hand back a cleared buffer: on a resize the retained pixels get
-     re-interpreted with the new GL_UNPACK_ROW_LENGTH below, which shows the
-     previous frame skewed until a full frame has been written into it. A
-     rotation keeps the byte count identical, so a realloc would not even
-     move the block and the stale image would survive intact. */
-  g_free (data);
-  data = g_malloc0 (width * height * sizeof(short)); // short or 3byte?
+  /* Nothing here is cleared. The buffer is about to be overwritten by the
+     next frame, and until that frame arrives the previous texture stays on
+     screen (see prevTexture below), so there is no moment where the contents
+     of this buffer are shown. Clearing it only ever produced a flash -- green,
+     since zero in this chroma format is Y=0 with both components at 0. */
+  if (data == NULL || width != allocWidth || height != allocHeight) {
+    g_free (data);
+    data = g_malloc ((gsize) width * (gsize) height * sizeof (short));
+    allocWidth = width;
+    allocHeight = height;
+  }
   /* Create textures */
   glGenTextures (1, (GLuint *)&pi_texture);
 
@@ -519,6 +536,13 @@ const gchar* gst_keycode_to_keyname(gint16 keycode)
 
   glBindTexture (GL_TEXTURE_RECTANGLE_EXT, pi_texture);
   glPixelStorei (GL_UNPACK_ROW_LENGTH, width);
+  if (awaitingFirstFrame) {
+    awaitingFirstFrame = NO;
+    if (prevTexture) {
+      glDeleteTextures (1, (GLuint *) &prevTexture);
+      prevTexture = 0;
+    }
+  }
 
   /* glTexSubImage2D is faster than glTexImage2D
      http://developer.apple.com/samplecode/Sample_Code/Graphics_3D/
@@ -537,6 +561,8 @@ const gchar* gst_keycode_to_keyname(gint16 keycode)
    glyph the system uses rather than something hand-drawn from polygons. */
 - (void) ensureOSDIcon
 {
+  GLint saved_alignment = 4, saved_row_length = 0;
+  GLboolean saved_client_storage = GL_FALSE;
   NSImage *symbol;
   NSBitmapImageRep *rep;
   NSSize size = NSMakeSize (64, 64);
@@ -592,14 +618,15 @@ const gchar* gst_keycode_to_keyname(gint16 keycode)
   }
   [NSGraphicsContext restoreGraphicsState];
 
-  [actualContext makeCurrentContext];
   glGenTextures (1, (GLuint *) &osdIconTexture);
   glBindTexture (GL_TEXTURE_2D, osdIconTexture);
   /* The video texture is uploaded with Apple client storage, where the driver
      keeps the caller's pointer instead of copying. That must be off here: the
      bitmap backing this icon is autoreleased, and the driver would be left
      reading freed memory on every later draw. */
-  glDisable (GL_UNPACK_CLIENT_STORAGE_APPLE);
+  glGetIntegerv (GL_UNPACK_ALIGNMENT, &saved_alignment);
+  glGetIntegerv (GL_UNPACK_ROW_LENGTH, &saved_row_length);
+  glGetBooleanv (GL_UNPACK_CLIENT_STORAGE_APPLE, &saved_client_storage);
   glPixelStorei (GL_UNPACK_CLIENT_STORAGE_APPLE, GL_FALSE);
   glPixelStorei (GL_UNPACK_ALIGNMENT, 1);
   glPixelStorei (GL_UNPACK_ROW_LENGTH, 0);
@@ -614,9 +641,11 @@ const gchar* gst_keycode_to_keyname(gint16 keycode)
   osdIconHeight = (int) size.height;
 
   /* Restore what initTextures set up for the video texture. */
-  glEnable (GL_UNPACK_CLIENT_STORAGE_APPLE);
-  glPixelStorei (GL_UNPACK_CLIENT_STORAGE_APPLE, GL_TRUE);
-  glPixelStorei (GL_UNPACK_ROW_LENGTH, width);
+  /* Put back exactly what was there. Guessing at the values instead is what
+     let these bakes disturb the video texture's own upload. */
+  glPixelStorei (GL_UNPACK_CLIENT_STORAGE_APPLE, saved_client_storage);
+  glPixelStorei (GL_UNPACK_ALIGNMENT, saved_alignment);
+  glPixelStorei (GL_UNPACK_ROW_LENGTH, saved_row_length);
 }
 
 static void
@@ -638,7 +667,11 @@ osd_fill_round_rect (float x, float y, float w, float h, float r)
       glVertex2f (cx + r * cosf (a), cy + r * sinf (a));
     }
   }
-  glVertex2f (x + r, y);
+  /* Close the fan on the first arc vertex. Anything else adds a stray
+     triangle from the centre out to it, and since the panel is translucent
+     that triangle blends over the panel a second time and reads as a black
+     wedge lying across the video. */
+  glVertex2f (x, y + r);
   glEnd ();
 }
 
@@ -647,6 +680,16 @@ osd_fill_round_rect (float x, float y, float w, float h, float r)
 #define CONTROLS_FADE_SECS     0.5
 #define CLOSE_BUTTON_MARGIN    22.0f
 #define CLOSE_BUTTON_SIZE      34.0f
+#define PLAYBACK_BAR_MARGIN    36.0f
+#define PLAYBACK_BAR_HEIGHT    44.0f     /* one row of the transport panel */
+#define PLAYBACK_BAR_MAX_WIDTH 520.0f
+#define PLAYBACK_BAR_MIN_WIDTH 360.0f
+#define PLAYBACK_TRACK_HEIGHT  6.0f
+#define PLAYBACK_CLOCK_WIDTH   52.0f
+#define PLAYBACK_TEXT_INSET    16.0f
+#define TRANSPORT_ICON         22.0f
+#define TRANSPORT_HIT          34.0f
+#define TRANSPORT_VOLUME_WIDTH 104.0f
 
 /* Where the close button sits, in view coordinates with the origin at the
    bottom left, matching the OSD's projection. */
@@ -671,6 +714,416 @@ osd_fill_round_rect (float x, float y, float w, float h, float r)
                                                repeats: YES];
   }
   [self setNeedsDisplay: YES];
+}
+
+- (void) setPlaybackPosition: (NSNumber *) seconds
+{
+  osdPosition = [seconds doubleValue];
+  if (osdDuration > 0.0) {
+    [self setNeedsDisplay: YES];
+  }
+}
+
+- (void) setPlaybackDuration: (NSNumber *) seconds
+{
+  osdDuration = [seconds doubleValue];
+  [self setNeedsDisplay: YES];
+}
+
+- (void) setPlaybackRate: (NSNumber *) rate
+{
+  osdRate = [rate doubleValue];
+  [self setNeedsDisplay: YES];
+}
+
+/* Layout of the transport panel, shaped after the controls macOS puts on
+   screen while it is receiving AirPlay video: one rounded panel with volume
+   and the transport buttons on the top row, and the scrubber between the two
+   clock readings on the bottom. Mirroring has no timeline, so it gets the top
+   row alone. */
+- (BOOL) transportPanel: (NSRect *) panel
+{
+  NSRect b = [self bounds];
+  CGFloat w = b.size.width - 2.0 * PLAYBACK_BAR_MARGIN;
+  CGFloat h, x, y;
+
+  if (w > PLAYBACK_BAR_MAX_WIDTH) {
+    w = PLAYBACK_BAR_MAX_WIDTH;
+  }
+  if (w < PLAYBACK_BAR_MIN_WIDTH) {
+    return NO;
+  }
+  h = (osdDuration > 0.0) ? 2.0 * PLAYBACK_BAR_HEIGHT : PLAYBACK_BAR_HEIGHT;
+  x = round ((b.size.width - w) / 2.0) + panelOffset.x;
+  y = PLAYBACK_BAR_MARGIN + panelOffset.y;
+
+  /* Keep it on screen however far it has been dragged. */
+  if (x < 8.0) {
+    x = 8.0;
+  } else if (x > b.size.width - w - 8.0) {
+    x = b.size.width - w - 8.0;
+  }
+  if (y < 8.0) {
+    y = 8.0;
+  } else if (y > b.size.height - h - 8.0) {
+    y = b.size.height - h - 8.0;
+  }
+  *panel = NSMakeRect (round (x), round (y), w, h);
+  return YES;
+}
+
+/* Top row: volume on the left, transport in the middle, fullscreen on the
+   right. It is the whole panel when there is no timeline. */
+- (NSRect) transportTopRow: (NSRect) panel
+{
+  if (osdDuration > 0.0) {
+    return NSMakeRect (NSMinX (panel), NSMaxY (panel) - PLAYBACK_BAR_HEIGHT,
+        NSWidth (panel), PLAYBACK_BAR_HEIGHT);
+  }
+  return panel;
+}
+
+- (NSRect) transportVolumeTrack: (NSRect) panel
+{
+  NSRect row = [self transportTopRow: panel];
+  CGFloat x = NSMinX (row) + PLAYBACK_TEXT_INSET + TRANSPORT_ICON + 12.0;
+
+  return NSMakeRect (x, NSMidY (row) - PLAYBACK_TRACK_HEIGHT / 2.0,
+      TRANSPORT_VOLUME_WIDTH, PLAYBACK_TRACK_HEIGHT);
+}
+
+- (NSRect) transportButton: (NSRect) panel index: (int) which
+{
+  NSRect row = [self transportTopRow: panel];
+  CGFloat cx = NSMidX (row) + which * 52.0;
+
+  return NSMakeRect (cx - TRANSPORT_HIT / 2.0, NSMidY (row) - TRANSPORT_HIT / 2.0,
+      TRANSPORT_HIT, TRANSPORT_HIT);
+}
+
+- (NSRect) transportFullScreenButton: (NSRect) panel
+{
+  NSRect row = [self transportTopRow: panel];
+
+  return NSMakeRect (NSMaxX (row) - PLAYBACK_TEXT_INSET - TRANSPORT_HIT,
+      NSMidY (row) - TRANSPORT_HIT / 2.0, TRANSPORT_HIT, TRANSPORT_HIT);
+}
+
+/* Bottom row, and the scrubber within it. NO when there is no timeline. */
+- (BOOL) transportProgressTrack: (NSRect) panel into: (NSRect *) track
+{
+  CGFloat x, w;
+
+  if (osdDuration <= 0.0) {
+    return NO;
+  }
+  x = NSMinX (panel) + PLAYBACK_TEXT_INSET + PLAYBACK_CLOCK_WIDTH + 12.0;
+  w = NSWidth (panel) - 2.0 * (PLAYBACK_TEXT_INSET + PLAYBACK_CLOCK_WIDTH + 12.0);
+  if (w < 40.0) {
+    return NO;
+  }
+  *track = NSMakeRect (x,
+      NSMinY (panel) + PLAYBACK_BAR_HEIGHT / 2.0 - PLAYBACK_TRACK_HEIGHT / 2.0,
+      w, PLAYBACK_TRACK_HEIGHT);
+  return YES;
+}
+
+/* mm:ss, or h:mm:ss once the stream is over an hour. */
+static NSString *
+osd_clock_string (double seconds)
+{
+  long total = (long) (seconds < 0.0 ? 0.0 : seconds);
+
+  if (total >= 3600) {
+    return [NSString stringWithFormat: @"%ld:%02ld:%02ld",
+        total / 3600, (total % 3600) / 60, total % 60];
+  }
+  return [NSString stringWithFormat: @"%ld:%02ld", total / 60, total % 60];
+}
+
+/* Both readings live in one texture the size of the panel, baked at the
+   screen's own scale and drawn one-to-one. An earlier version baked a small
+   strip and stretched it to the panel width, which spread the glyphs sideways
+   and blurred them. */
+- (void) ensureTimeTextureForWidth: (CGFloat) w scale: (CGFloat) scale
+{
+  GLint saved_alignment = 4, saved_row_length = 0;
+  GLboolean saved_client_storage = GL_FALSE;
+  NSString *elapsed = osd_clock_string (osdPosition);
+  NSString *total = osd_clock_string (osdDuration);
+  NSString *wanted = [NSString stringWithFormat: @"%@|%@|%.0f|%.1f",
+      elapsed, total, w, scale];
+  NSBitmapImageRep *rep;
+  NSDictionary *attrs;
+  NSInteger px = (NSInteger) round (w * scale);
+  NSInteger py = (NSInteger) round (PLAYBACK_BAR_HEIGHT * scale);
+
+  if (timeTexString != nil && [timeTexString isEqualToString: wanted]) {
+    return;
+  }
+  if (px <= 0 || py <= 0) {
+    return;
+  }
+
+  rep = [[[NSBitmapImageRep alloc]
+      initWithBitmapDataPlanes: NULL
+                    pixelsWide: px
+                    pixelsHigh: py
+                 bitsPerSample: 8
+               samplesPerPixel: 4
+                      hasAlpha: YES
+                      isPlanar: NO
+                colorSpaceName: NSCalibratedRGBColorSpace
+                   bytesPerRow: px * 4
+                  bitsPerPixel: 32] autorelease];
+  if (rep == nil) {
+    return;
+  }
+  /* Tell the rep its size in points, so drawing happens at the screen's scale
+     rather than one glyph pixel per texture pixel. */
+  [rep setSize: NSMakeSize (w, PLAYBACK_BAR_HEIGHT)];
+
+  attrs = [NSDictionary dictionaryWithObjectsAndKeys:
+      [NSFont monospacedDigitSystemFontOfSize: 15
+                                       weight: NSFontWeightMedium], NSFontAttributeName,
+      [NSColor whiteColor], NSForegroundColorAttributeName, nil];
+
+  [NSGraphicsContext saveGraphicsState];
+  [NSGraphicsContext setCurrentContext:
+      [NSGraphicsContext graphicsContextWithBitmapImageRep: rep]];
+  [[NSColor clearColor] set];
+  NSRectFill (NSMakeRect (0, 0, w, PLAYBACK_BAR_HEIGHT));
+  {
+    NSSize es = [elapsed sizeWithAttributes: attrs];
+    NSSize ts = [total sizeWithAttributes: attrs];
+
+    [elapsed drawAtPoint: NSMakePoint (PLAYBACK_TEXT_INSET,
+        (PLAYBACK_BAR_HEIGHT - es.height) / 2.0) withAttributes: attrs];
+    [total drawAtPoint: NSMakePoint (w - PLAYBACK_TEXT_INSET - ts.width,
+        (PLAYBACK_BAR_HEIGHT - ts.height) / 2.0) withAttributes: attrs];
+  }
+  [NSGraphicsContext restoreGraphicsState];
+
+  if (timeTexture == 0) {
+    glGenTextures (1, (GLuint *) &timeTexture);
+  }
+  glBindTexture (GL_TEXTURE_2D, timeTexture);
+  /* Client storage would leave the driver holding this autoreleased bitmap;
+     see ensureOSDIcon. */
+  glGetIntegerv (GL_UNPACK_ALIGNMENT, &saved_alignment);
+  glGetIntegerv (GL_UNPACK_ROW_LENGTH, &saved_row_length);
+  glGetBooleanv (GL_UNPACK_CLIENT_STORAGE_APPLE, &saved_client_storage);
+  glPixelStorei (GL_UNPACK_CLIENT_STORAGE_APPLE, GL_FALSE);
+  glPixelStorei (GL_UNPACK_ALIGNMENT, 1);
+  glPixelStorei (GL_UNPACK_ROW_LENGTH, 0);
+  glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+  glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+  glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+  glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+  glTexImage2D (GL_TEXTURE_2D, 0, GL_RGBA, (GLsizei) px, (GLsizei) py, 0,
+      GL_RGBA, GL_UNSIGNED_BYTE, [rep bitmapData]);
+  timeTexWidth = (int) px;
+  timeTexHeight = (int) py;
+
+  /* Put back exactly what was there. Guessing at the values instead is what
+     let these bakes disturb the video texture's own upload. */
+  glPixelStorei (GL_UNPACK_CLIENT_STORAGE_APPLE, saved_client_storage);
+  glPixelStorei (GL_UNPACK_ALIGNMENT, saved_alignment);
+  glPixelStorei (GL_UNPACK_ROW_LENGTH, saved_row_length);
+
+  [timeTexString release];
+  timeTexString = [wanted retain];
+}
+
+/* Simple filled shapes for the transport glyphs; drawing them as geometry
+   keeps them crisp at any size and avoids another texture to manage. */
+static void
+osd_fill_quad (float x, float y, float w, float h)
+{
+  glBegin (GL_QUADS);
+  glVertex2f (x, y);
+  glVertex2f (x + w, y);
+  glVertex2f (x + w, y + h);
+  glVertex2f (x, y + h);
+  glEnd ();
+}
+
+static void
+osd_fill_triangle (float x0, float y0, float x1, float y1, float x2, float y2)
+{
+  glBegin (GL_TRIANGLES);
+  glVertex2f (x0, y0);
+  glVertex2f (x1, y1);
+  glVertex2f (x2, y2);
+  glEnd ();
+}
+
+static void
+osd_fill_disc (float cx, float cy, float r)
+{
+  int i;
+
+  glBegin (GL_TRIANGLE_FAN);
+  glVertex2f (cx, cy);
+  for (i = 0; i <= 24; i++) {
+    float a = 2.0f * (float) M_PI * i / 24.0f;
+    glVertex2f (cx + r * cosf (a), cy + r * sinf (a));
+  }
+  glEnd ();
+}
+
+/* A track with the played part filled in, plus the knob. */
+static void
+osd_draw_slider (NSRect track, float fraction, float alpha, BOOL knob)
+{
+  float h = (float) NSHeight (track);
+  float filled = (float) NSWidth (track) * fraction;
+
+  glColor4f (1.0f, 1.0f, 1.0f, 0.28f * alpha);
+  osd_fill_round_rect ((float) NSMinX (track), (float) NSMinY (track),
+      (float) NSWidth (track), h, h / 2.0f);
+  if (filled > 0.0f) {
+    if (filled < h) {
+      filled = h;
+    }
+    glColor4f (1.0f, 1.0f, 1.0f, 0.95f * alpha);
+    osd_fill_round_rect ((float) NSMinX (track), (float) NSMinY (track), filled,
+        h, h / 2.0f);
+  }
+  if (knob) {
+    glColor4f (1.0f, 1.0f, 1.0f, 0.98f * alpha);
+    osd_fill_disc ((float) NSMinX (track) + (float) NSWidth (track) * fraction,
+        (float) NSMidY (track), 8.0f);
+  }
+}
+
+- (void) drawTransportGlyphs: (NSRect) panel alpha: (float) alpha
+{
+  NSRect r;
+  float cx, cy, s;
+
+  glColor4f (1.0f, 1.0f, 1.0f, 0.95f * alpha);
+
+  /* Skip back ten seconds. */
+  r = [self transportButton: panel index: -1];
+  cx = (float) NSMidX (r);
+  cy = (float) NSMidY (r);
+  s = 5.0f;
+  osd_fill_triangle (cx - 1.0f, cy + s, cx - 1.0f, cy - s, cx - 1.0f - s * 1.2f, cy);
+  osd_fill_triangle (cx + s * 1.2f + 1.0f, cy + s, cx + s * 1.2f + 1.0f, cy - s,
+      cx + 1.0f, cy);
+
+  /* Play or pause, whichever the stream is not doing now. */
+  r = [self transportButton: panel index: 0];
+  cx = (float) NSMidX (r);
+  cy = (float) NSMidY (r);
+  if (osdRate > 0.0) {
+    osd_fill_quad (cx - 6.0f, cy - 8.0f, 4.0f, 16.0f);
+    osd_fill_quad (cx + 2.0f, cy - 8.0f, 4.0f, 16.0f);
+  } else {
+    osd_fill_triangle (cx - 5.0f, cy + 8.0f, cx - 5.0f, cy - 8.0f, cx + 8.0f, cy);
+  }
+
+  /* Skip forward ten seconds. */
+  r = [self transportButton: panel index: 1];
+  cx = (float) NSMidX (r);
+  cy = (float) NSMidY (r);
+  s = 5.0f;
+  osd_fill_triangle (cx - s * 1.2f - 1.0f, cy + s, cx - s * 1.2f - 1.0f, cy - s,
+      cx - 1.0f, cy);
+  osd_fill_triangle (cx + 1.0f, cy + s, cx + 1.0f, cy - s, cx + 1.0f + s * 1.2f, cy);
+
+  /* Fullscreen: a screen outline with a stand, as macOS draws it. */
+  r = [self transportFullScreenButton: panel];
+  cx = (float) NSMidX (r);
+  cy = (float) NSMidY (r) + 1.0f;
+  glLineWidth (1.6f);
+  glBegin (GL_LINE_LOOP);
+  glVertex2f (cx - 9.0f, cy - 6.0f);
+  glVertex2f (cx + 9.0f, cy - 6.0f);
+  glVertex2f (cx + 9.0f, cy + 6.0f);
+  glVertex2f (cx - 9.0f, cy + 6.0f);
+  glEnd ();
+  osd_fill_quad (cx - 4.0f, cy - 9.0f, 8.0f, 2.0f);
+}
+
+- (void) drawTransportPanel: (float) alpha
+{
+  NSRect panel, vol, track;
+  float fraction;
+
+  if (![self transportPanel: &panel]) {
+    return;
+  }
+
+  glColor4f (0.0f, 0.0f, 0.0f, 0.55f * alpha);
+  osd_fill_round_rect ((float) NSMinX (panel), (float) NSMinY (panel),
+      (float) NSWidth (panel), (float) NSHeight (panel), 16.0f);
+
+  /* Speaker. Built here rather than only when the volume changes, so the panel
+     is never drawn with a hole where it belongs. */
+  [self ensureOSDIcon];
+  if (osdIconTexture != 0) {
+    NSRect row = [self transportTopRow: panel];
+    float ix = (float) (NSMinX (row) + PLAYBACK_TEXT_INSET);
+    float iy = (float) (NSMidY (row) - TRANSPORT_ICON / 2.0);
+
+    glEnable (GL_TEXTURE_2D);
+    glBindTexture (GL_TEXTURE_2D, osdIconTexture);
+    glColor4f (1.0f, 1.0f, 1.0f, 0.95f * alpha);
+    glBegin (GL_QUADS);
+    glTexCoord2f (0.0f, 1.0f); glVertex2f (ix, iy);
+    glTexCoord2f (1.0f, 1.0f); glVertex2f (ix + TRANSPORT_ICON, iy);
+    glTexCoord2f (1.0f, 0.0f); glVertex2f (ix + TRANSPORT_ICON, iy + TRANSPORT_ICON);
+    glTexCoord2f (0.0f, 0.0f); glVertex2f (ix, iy + TRANSPORT_ICON);
+    glEnd ();
+    glDisable (GL_TEXTURE_2D);
+  }
+
+  vol = [self transportVolumeTrack: panel];
+  osd_draw_slider (vol, osdVolume, alpha, YES);
+
+  if (osdDuration <= 0.0) {
+    return;                     /* mirroring: no transport, no scrubber */
+  }
+
+  [self drawTransportGlyphs: panel alpha: alpha];
+
+  {
+    CGFloat scale = [[self window] backingScaleFactor];
+
+    if (scale <= 0.0) {
+      scale = 1.0;
+    }
+    [self ensureTimeTextureForWidth: NSWidth (panel) scale: scale];
+  }
+  if (timeTexture != 0) {
+    float tx = (float) NSMinX (panel);
+    float ty = (float) NSMinY (panel);
+    float tw = (float) NSWidth (panel);
+    float th = PLAYBACK_BAR_HEIGHT;
+
+    glEnable (GL_TEXTURE_2D);
+    glBindTexture (GL_TEXTURE_2D, timeTexture);
+    glColor4f (1.0f, 1.0f, 1.0f, 0.9f * alpha);
+    glBegin (GL_QUADS);
+    glTexCoord2f (0.0f, 1.0f); glVertex2f (tx, ty);
+    glTexCoord2f (1.0f, 1.0f); glVertex2f (tx + tw, ty);
+    glTexCoord2f (1.0f, 0.0f); glVertex2f (tx + tw, ty + th);
+    glTexCoord2f (0.0f, 0.0f); glVertex2f (tx, ty + th);
+    glEnd ();
+    glDisable (GL_TEXTURE_2D);
+  }
+
+  if ([self transportProgressTrack: panel into: &track]) {
+    fraction = (float) (osdPosition / osdDuration);
+    if (fraction < 0.0f) {
+      fraction = 0.0f;
+    } else if (fraction > 1.0f) {
+      fraction = 1.0f;
+    }
+    osd_draw_slider (track, fraction, alpha, YES);
+  }
 }
 
 - (void) drawCloseButton
@@ -713,7 +1166,7 @@ osd_fill_round_rect (float x, float y, float w, float h, float r)
 {
   double now = [NSDate timeIntervalSinceReferenceDate];
   double left = controlsExpiry - now;
-  float alpha, panel_w, panel_h, px, py, icon, bar_x, bar_y, bar_w, bar_h;
+  float alpha;
   NSRect b;
   CGFloat scale;
 
@@ -752,43 +1205,7 @@ osd_fill_round_rect (float x, float y, float w, float h, float r)
     goto restore;
   }
 
-  panel_w = 240.0f;
-  panel_h = 68.0f;
-  px = (float) (b.size.width - panel_w) / 2.0f;
-  py = 72.0f;
-
-  glColor4f (0.0f, 0.0f, 0.0f, 0.55f * alpha);
-  osd_fill_round_rect (px, py, panel_w, panel_h, 16.0f);
-
-  icon = 30.0f;
-  if (osdIconTexture != 0) {
-    glEnable (GL_TEXTURE_2D);
-    glBindTexture (GL_TEXTURE_2D, osdIconTexture);
-    glColor4f (1.0f, 1.0f, 1.0f, alpha);
-    glBegin (GL_QUADS);
-    glTexCoord2f (0.0f, 1.0f); glVertex2f (px + 20.0f, py + (panel_h - icon) / 2.0f);
-    glTexCoord2f (1.0f, 1.0f); glVertex2f (px + 20.0f + icon, py + (panel_h - icon) / 2.0f);
-    glTexCoord2f (1.0f, 0.0f); glVertex2f (px + 20.0f + icon, py + (panel_h + icon) / 2.0f);
-    glTexCoord2f (0.0f, 0.0f); glVertex2f (px + 20.0f, py + (panel_h + icon) / 2.0f);
-    glEnd ();
-    glDisable (GL_TEXTURE_2D);
-  }
-
-  bar_x = px + 20.0f + icon + 16.0f;
-  bar_w = panel_w - (bar_x - px) - 20.0f;
-  bar_h = 8.0f;
-  bar_y = py + (panel_h - bar_h) / 2.0f;
-
-  glColor4f (1.0f, 1.0f, 1.0f, 0.25f * alpha);
-  osd_fill_round_rect (bar_x, bar_y, bar_w, bar_h, bar_h / 2.0f);
-  if (osdVolume > 0.0f) {
-    float filled = bar_w * osdVolume;
-    if (filled < bar_h) {
-      filled = bar_h;
-    }
-    glColor4f (1.0f, 1.0f, 1.0f, 0.95f * alpha);
-    osd_fill_round_rect (bar_x, bar_y, filled, bar_h, bar_h / 2.0f);
-  }
+  [self drawTransportPanel: alpha];
 
 restore:
   glColor4f (1.0f, 1.0f, 1.0f, 1.0f);
@@ -824,7 +1241,7 @@ restore:
   [self noteUserActivity];
 }
 
-- (void) drawQuad {
+- (void) drawQuadWidth: (int) w height: (int) h {
   f_x = 1.0;
   f_y = 1.0;
 
@@ -833,15 +1250,19 @@ restore:
   glTexCoord2f (0.0, 0.0);
   glVertex2f (-f_x, f_y);
   /* Bottom left */
-  glTexCoord2f (0.0, (float) height);
+  glTexCoord2f (0.0, (float) h);
   glVertex2f (-f_x, -f_y);
   /* Bottom right */
-  glTexCoord2f ((float) width, (float) height);
+  glTexCoord2f ((float) w, (float) h);
   glVertex2f (f_x, -f_y);
   /* Top right */
-  glTexCoord2f ((float) width, 0.0);
+  glTexCoord2f ((float) w, 0.0);
   glVertex2f (f_x, f_y);
   glEnd ();
+}
+
+- (void) drawQuad {
+  [self drawQuadWidth: width height: height];
 }
 
 - (void) drawRect:(NSRect) rect {
@@ -863,8 +1284,13 @@ restore:
   }
 
   /* Draw */
-  glBindTexture (GL_TEXTURE_RECTANGLE_EXT, pi_texture); // FIXME
-  [self drawQuad];
+  if (awaitingFirstFrame && prevTexture) {
+    glBindTexture (GL_TEXTURE_RECTANGLE_EXT, prevTexture);
+    [self drawQuadWidth: prevWidth height: prevHeight];
+  } else {
+    glBindTexture (GL_TEXTURE_RECTANGLE_EXT, pi_texture); // FIXME
+    [self drawQuad];
+  }
   [self drawVolumeOSD];
   /* Draw */
   [actualContext flushBuffer];
@@ -1036,6 +1462,16 @@ restore:
    once fullscreen switches which axis is pinned, since which one crops less
    depends on whether the client is landscape or portrait. Escape leaves
    fullscreen and goes back to showing the whole frame. */
+/* Double click is a plain in/out toggle, unlike Enter which also cycles which
+   axis is pinned once filling. */
+- (void) toggleFillScreen {
+  if (pseudoFullScreen) {
+    [self leaveFillScreen];
+  } else {
+    [self enterFillScreen];
+  }
+}
+
 - (void) enterFillScreen {
   if (!pseudoFullScreen) {
     [self setFillMode: GST_OSX_FILL_HEIGHT];
@@ -1232,14 +1668,149 @@ restore:
     return;
   }
 
+  if (controlsExpiry > [NSDate timeIntervalSinceReferenceDate] &&
+      [self controlsAtPoint: where begin: YES]) {
+    return;
+  }
+
   if ([event clickCount] == 2)
-    [self enterFillScreen];
+    [self toggleFillScreen];
   [self sendMouseEvent:event: "mouse-button-press"];
   [super mouseDown: event];
 }
 
+/* Routes a click or drag on the panel to the control under it. Returns NO when
+   the point is not on the panel, so the caller can treat it as ordinary input.
+   Actions the sink cannot carry out itself are reported through the same key
+   channel the close button uses. */
+- (BOOL) controlsAtPoint: (NSPoint) where begin: (BOOL) begin
+{
+  NSRect panel, vol, track;
+  float fraction;
+  char name[64];
+
+  if (![self transportPanel: &panel]) {
+    return NO;
+  }
+
+  vol = [self transportVolumeTrack: panel];
+  /* The whole top row's left third counts as the volume control, so the
+     slider is not a hairline target. */
+  vol = NSMakeRect (NSMinX (vol) - 8.0, NSMinY (vol) - 16.0,
+      NSWidth (vol) + 16.0, NSHeight (vol) + 32.0);
+
+  if (begin) {
+    if (!NSPointInRect (where, panel)) {
+      return NO;
+    }
+    if (NSPointInRect (where, vol)) {
+      volumeDragging = YES;
+    } else if (osdDuration > 0.0 &&
+        [self transportProgressTrack: panel into: &track] &&
+        where.y < NSMinY (panel) + PLAYBACK_BAR_HEIGHT) {
+      scrubbing = YES;
+    } else if (osdDuration > 0.0) {
+      if (NSPointInRect (where, [self transportButton: panel index: -1])) {
+        [self sendControlKey: "uxplay-skip:-10"];
+        return YES;
+      }
+      if (NSPointInRect (where, [self transportButton: panel index: 0])) {
+        [self sendControlKey: "uxplay-playpause"];
+        return YES;
+      }
+      if (NSPointInRect (where, [self transportButton: panel index: 1])) {
+        [self sendControlKey: "uxplay-skip:10"];
+        return YES;
+      }
+      if (NSPointInRect (where, [self transportFullScreenButton: panel])) {
+        [self toggleFillScreen];
+        return YES;
+      }
+    } else if (NSPointInRect (where, [self transportFullScreenButton: panel])) {
+      [self toggleFillScreen];
+      return YES;
+    }
+
+    if (!volumeDragging && !scrubbing) {
+      /* Anywhere on the panel that is not a control is a handle: the panel can
+         sit over something the user wants to see. */
+      panelDragging = YES;
+      panelDragAnchor = where;
+      panelOffsetAtAnchor = panelOffset;
+    }
+    return YES;
+  }
+
+  if (panelDragging) {
+    NSRect placed;
+
+    panelOffset.x = panelOffsetAtAnchor.x + (where.x - panelDragAnchor.x);
+    panelOffset.y = panelOffsetAtAnchor.y + (where.y - panelDragAnchor.y);
+    /* Fold the on-screen clamp back into the offset, so dragging past an edge
+       does not build up slack the user has to wind off again. */
+    if ([self transportPanel: &placed]) {
+      NSRect b = [self bounds];
+
+      panelOffset.x = NSMinX (placed) - round ((b.size.width - NSWidth (placed)) / 2.0);
+      panelOffset.y = NSMinY (placed) - PLAYBACK_BAR_MARGIN;
+    }
+    [self noteUserActivity];
+    return YES;
+  }
+
+  if (volumeDragging) {
+    vol = [self transportVolumeTrack: panel];
+    fraction = (float) ((where.x - NSMinX (vol)) / NSWidth (vol));
+    fraction = (fraction < 0.0f) ? 0.0f : ((fraction > 1.0f) ? 1.0f : fraction);
+    osdVolume = fraction;
+    [self noteUserActivity];
+    g_snprintf (name, sizeof (name), "uxplay-volume:%.4f", fraction);
+    [self sendControlKey: name];
+    return YES;
+  }
+
+  if (scrubbing && [self transportProgressTrack: panel into: &track]) {
+    fraction = (float) ((where.x - NSMinX (track)) / NSWidth (track));
+    fraction = (fraction < 0.0f) ? 0.0f : ((fraction > 1.0f) ? 1.0f : fraction);
+    /* Move the knob straight away; position reports only catch up a second
+       later, and a scrubber that lags the pointer feels broken. */
+    osdPosition = fraction * osdDuration;
+    [self noteUserActivity];
+    g_snprintf (name, sizeof (name), "uxplay-seek:%.3f", osdPosition);
+    [self sendControlKey: name];
+    return YES;
+  }
+  return NO;
+}
+
+- (void) sendControlKey: (const char *) name
+{
+  if (navigation) {
+    gst_navigation_send_key_event (navigation, "key-press", name);
+  }
+}
+
+- (void)mouseDragged:(NSEvent *) event;
+{
+  NSPoint where = [self convertPoint: [event locationInWindow] fromView: nil];
+
+  [self noteUserActivity];
+  if ([self controlsAtPoint: where begin: NO]) {
+    return;
+  }
+  [self sendMouseEvent:event: "mouse-move"];
+  [super mouseDragged: event];
+}
+
 - (void)mouseUp:(NSEvent *) event;
 {
+  if (scrubbing || volumeDragging || panelDragging) {
+    scrubbing = NO;
+    volumeDragging = NO;
+    panelDragging = NO;
+    [self setNeedsDisplay: YES];
+    return;
+  }
   [self sendMouseEvent:event: "mouse-button-release"];
   [super mouseUp: event];
 }

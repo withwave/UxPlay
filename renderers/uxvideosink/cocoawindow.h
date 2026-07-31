@@ -48,6 +48,10 @@ struct _GstOSXImage;
     int initDone;
     char* data;
     int width, height;
+    int allocWidth, allocHeight;  /* what data was last sized for */
+    unsigned int prevTexture;     /* kept on screen until the new one fills */
+    int prevWidth, prevHeight;
+    BOOL awaitingFirstFrame;
     BOOL fullscreen;
     BOOL keepAspectRatio;
     int fillMode;
@@ -66,8 +70,21 @@ struct _GstOSXImage;
     NSRect drawingBounds;
     NSThread *mainThread;
     NSUInteger savedModifierFlags;
+    double osdPosition;         /* seconds into the stream */
+    double osdDuration;         /* 0 when the stream has no timeline */
+    unsigned int timeTexture;   /* the two clock readings, baked as one strip */
+    int timeTexWidth, timeTexHeight;
+    NSString *timeTexString;    /* what that strip currently says */
+    BOOL scrubbing;
+    BOOL volumeDragging;
+    BOOL panelDragging;
+    NSPoint panelOffset;        /* where the user has moved the panel to */
+    NSPoint panelDragAnchor;
+    NSPoint panelOffsetAtAnchor;
+    double osdRate;             /* 0 while paused */
 }
 - (void) drawQuad;
+- (void) drawQuadWidth: (int) w height: (int) h;
 - (void) drawRect: (NSRect) rect;
 - (id) initWithFrame: (NSRect) frame;
 - (void) initTextures;
@@ -80,9 +97,14 @@ struct _GstOSXImage;
 - (void) setKeepAspectRatio: (BOOL) flag;
 - (void) showVolumeOSD: (float) level;
 - (void) showVolumeOSDNumber: (NSNumber *) level;
+- (void) setPlaybackPosition: (NSNumber *) seconds;
+- (void) setPlaybackDuration: (NSNumber *) seconds;
+- (void) setPlaybackRate: (NSNumber *) rate;
+- (void) sendControlKey: (const char *) name;
 - (void) setFillMode: (int) mode;
 - (int) fillMode;
 - (BOOL) isInNativeFullScreen;
+- (void) toggleFillScreen;
 - (void) enterFillScreen;
 - (void) leaveFillScreen;
 - (void) reshape;

@@ -25,7 +25,12 @@ static void
         logger_log(raop->logger, LOGGER_ERR, "hls_get_current_video: failed to identify current_playlist");
         return NULL;
     }
-    assert(raop->airplay_video[raop->current_video]);
+    if (!raop->airplay_video[raop->current_video]) {
+        logger_log(raop->logger, LOGGER_ERR,
+                   "hls_get_current_video: playlist %d has already been torn down",
+                   raop->current_video);
+        return NULL;
+    }
     return (void *) raop->airplay_video[raop->current_video];
 }
 
@@ -123,15 +128,14 @@ http_handler_scrub(raop_conn_t *conn, http_request_t *request, http_response_t *
     logger_log(raop->logger, LOGGER_DEBUG, "**********************SCRUB %f ***********************",scrub_position);
     raop->callbacks.on_video_scrub(raop->callbacks.cls, scrub_position);
 
-    /* The client pauses itself before scrubbing and waits to be told that
-       playback resumed; it follows these events rather than /playback-info,
-       which only feeds its progress display. Without this its transport stays
-       stopped no matter how healthy the stream is. */
+    /* The client pauses itself before scrubbing and waits to be told playback
+       resumed; its transport follows these events, not the /playback-info it
+       polls. Without this it stays showing stopped however healthy the stream
+       is. */
     {
         airplay_video_t *airplay_video = (airplay_video_t *) hls_get_current_video(raop);
         if (airplay_video) {
-            playback_state_event((void *) conn, "playing",
-                                 get_apple_session_id(airplay_video));
+            playback_state_event(raop, "playing", get_apple_session_id(airplay_video));
         }
     }
 }
@@ -156,12 +160,10 @@ http_handler_rate(raop_conn_t *conn, http_request_t *request, http_response_t *r
     }
     raop->callbacks.on_video_rate(raop->callbacks.cls, rate_value);
 
-    /* Echo the change back as an event so the client's transport and ours stay
-       on the same state. */
     {
         airplay_video_t *airplay_video = (airplay_video_t *) hls_get_current_video(raop);
         if (airplay_video) {
-            playback_state_event((void *) conn, rate_value > 0.0f ? "playing" : "paused",
+            playback_state_event(raop, rate_value > 0.0f ? "playing" : "paused",
                                  get_apple_session_id(airplay_video));
         }
     }
@@ -173,14 +175,10 @@ http_handler_stop(raop_conn_t *conn, http_request_t *request, http_response_t *r
 
     raop_t *raop = conn->raop;
     logger_log(raop->logger, LOGGER_INFO, "client HTTP request POST stop");
-
-    /* Tell the client playback really has ended, so its transport lets go of
-       the session instead of sitting on the state it last saw. */
     {
-        airplay_video_t *airplay_video = (airplay_video_t *) hls_get_current_video(raop);
-        if (airplay_video) {
-            playback_state_event((void *) conn, "stopped",
-                                 get_apple_session_id(airplay_video));
+        const char *session_id = http_request_get_header(request, "X-Apple-Session-ID");
+        if (session_id) {
+            playback_state_event(raop, "stopped", session_id);
         }
     }
     raop->callbacks.on_video_stop(raop->callbacks.cls);
@@ -210,7 +208,10 @@ http_handler_set_property(raop_conn_t *conn,
     */
 
     airplay_video_t *airplay_video = (airplay_video_t *) hls_get_current_video(raop);
-    assert(airplay_video);
+    if (!airplay_video) {
+        http_response_init(response, "HTTP/1.1", 400, "Bad Request");
+        return;
+    }
     if (!strcmp(property, "selectedMediaArray")) {
         /* verify that this request contains a binary plist*/
         char *header_str = NULL;
@@ -499,7 +500,6 @@ http_handler_action(raop_conn_t *conn, http_request_t *request, http_response_t 
 
     raop_t *raop = conn->raop;
     airplay_video_t *airplay_video = (airplay_video_t *) hls_get_current_video(raop);
-    assert(airplay_video);
     bool data_is_plist = false;
     plist_t req_root_node = NULL;
     uint64_t uint_val = 0;
@@ -507,6 +507,13 @@ http_handler_action(raop_conn_t *conn, http_request_t *request, http_response_t 
     int fcup_response_statuscode = 0;
     char *type = NULL;
     bool logger_debug = (logger_get_level(raop->logger) >= LOGGER_DEBUG);
+
+    /* The client keeps sending actions -- playlistRemove in particular -- after
+       the video it refers to has been torn down. That is its business, not a
+       reason to abort the whole server, which is what asserting here did. */
+    if (!airplay_video) {
+        goto post_action_error;
+    }
 
     const char* session_id = http_request_get_header(request, "X-Apple-Session-ID");
     if (!session_id) {

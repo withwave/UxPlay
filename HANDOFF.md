@@ -163,6 +163,27 @@ implemented`). 경로는 **DACP** 하나다:
 
 교체 중인 파이프라인이 뒤늦게 `/master.m3u8`을 요청해 404를 받는 것은 별개이고 재생을 막지 않는다.
 
+### 메뉴바에서 연결 시 전체화면 켜고 끄기
+
+Windows 트레이에 있던 스위치를 맥 메뉴바에도 붙였다. 훅 API는 양쪽 동일
+(`statusbar_set_fullscreen_on_connect_hooks(get, set)`)이라 `uxplay.cpp`의 등록은 공용이다.
+
+맥에서 이것이 되려면 두 가지가 필요했다:
+
+- **재적용 지점.** 싱크는 세션마다 `make_video_sink()`로 새로 만들어지고 그때 `-vs` 줄의
+  `start-fullscreen=true`가 다시 걸린다. 그래서 메뉴에서 꺼도 다음 연결에서 되살아난다. 처음에는
+  `video_renderer_set_sink_property()`로 덮으려 했는데 **아무 일도 하지 않았다** — 그 함수는
+  파이프라인 안에서 싱크를 찾는데, 이 시점의 싱크는 아직 playbin에 들어가기 전이라 못 찾고 조용히
+  return한다. 싱크 **객체 자체**에 `g_object_set`으로 걸어야 한다
+- **초기값.** 프로세스가 시작한 값은 `-vs` 줄에서 오므로 TRUE로 가정하면 안 된다. getter가 싱크에서
+  읽어와 seed한다. 세션이 없으면 읽을 수 없어 기본값을 보이고, 세션이 생기면 맞춰진다
+
+확인: 세션 3회에서 `start-fullscreen forced to {false,true,false} by the menu`가 로그에 찍히고
+동작도 일치.
+
+**미러링(비-HLS) 경로에는 걸려 있지 않다.** 그쪽은 `gst_parse_launch`가 문자열에서 싱크까지
+만들므로 가로챌 지점이 다르다. HLS만 적용된다.
+
 ### 미해결: 영상이 끝났다는 것을 클라이언트에 알릴 방법
 
 EOS 시 `video_eos_watch_callback`은 `commanded_rate`를 0으로 두고 세션만 유지하며, **클라이언트에게

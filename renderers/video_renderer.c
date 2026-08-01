@@ -76,6 +76,13 @@ static gint64 hls_seek_start = 0;
 static gint64 hls_seek_end = 0;
 static gint64 hls_duration = 0;
 static gboolean hls_seek_enabled = FALSE;
+#ifndef _WIN32
+/* Defined with the fullscreen-on-connect accessors further down; declared here
+   because video_renderer_init has to put the choice back on a rebuilt sink. */
+static gboolean fullscreen_on_connect;
+static gboolean fullscreen_on_connect_seeded;
+static void video_renderer_set_sink_property(const char *name, ...);
+#endif
 static gboolean hls_playing = FALSE;
 static gboolean hls_buffer_empty = FALSE;
 static gboolean hls_buffer_full = FALSE;
@@ -377,6 +384,21 @@ void video_renderer_init(logger_t *render_logger, const char *server_name, video
                     logger_log(logger, LOGGER_ERR, "video_renderer_init: failed to create playbin_videosink");
                 } else {
                     logger_log(logger, LOGGER_DEBUG, "video_renderer_init: create playbin_videosink at %p", playbin_videosink);
+#ifndef _WIN32
+                    /* Put the menu's choice back on the sink that has just been
+                       built from the -vs line. It has to happen here, on the
+                       element itself: playbin has not adopted it yet, so looking
+                       the sink up in the pipeline by property finds nothing and
+                       the override is silently dropped -- which is why turning
+                       the setting off still came up fullscreen. */
+                    if (fullscreen_on_connect_seeded) {
+                        g_object_set(G_OBJECT(playbin_videosink), "start-fullscreen",
+                                     fullscreen_on_connect, NULL);
+                        logger_log(logger, LOGGER_DEBUG,
+                                   "video_renderer_init: start-fullscreen forced to %s by the menu",
+                                   fullscreen_on_connect ? "true" : "false");
+                    }
+#endif
                     g_object_set(G_OBJECT (renderer_type[i]->pipeline), "video-sink", playbin_videosink, NULL);
                 }
             }
@@ -1244,6 +1266,40 @@ void video_renderer_set_display(int index) {
 /* Which display the video window sits on. -1 leaves it where it is. */
 void video_renderer_set_display(int index) {
     video_renderer_set_sink_property("display-index", (gint) index, NULL);
+}
+
+/* Whether a starting stream takes the screen. uxvideosink reads
+   start-fullscreen when the stream begins, so a change here applies from the
+   next session rather than to the one already running -- which is what the
+   setting says: on connect.
+
+   Seeded from the sink rather than assumed, because the value the process
+   started with comes from the -vs line (uxplay-mac passes start-fullscreen=true)
+   and the menu has to open showing what is actually in force. */
+static gboolean fullscreen_on_connect = TRUE;
+static gboolean fullscreen_on_connect_seeded = FALSE;
+
+bool video_renderer_get_fullscreen_on_connect(void) {
+    if (!fullscreen_on_connect_seeded) {
+        GstElement *sink;
+
+        g_rec_mutex_lock(&renderer_lock);
+        if (renderer && renderer->pipeline &&
+            (sink = find_element_with_property(GST_BIN(renderer->pipeline),
+                                               "start-fullscreen"))) {
+            g_object_get(G_OBJECT(sink), "start-fullscreen", &fullscreen_on_connect, NULL);
+            gst_object_unref(sink);
+            fullscreen_on_connect_seeded = TRUE;
+        }
+        g_rec_mutex_unlock(&renderer_lock);
+    }
+    return fullscreen_on_connect ? true : false;
+}
+
+void video_renderer_set_fullscreen_on_connect(bool enable) {
+    fullscreen_on_connect = enable ? TRUE : FALSE;
+    fullscreen_on_connect_seeded = TRUE;
+    video_renderer_set_sink_property("start-fullscreen", fullscreen_on_connect, NULL);
 }
 #endif
 

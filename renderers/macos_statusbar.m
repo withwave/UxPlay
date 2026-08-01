@@ -29,6 +29,9 @@ static statusbar_state_t current_state = STATUSBAR_IDLE;
 static NSString *client_name = nil;
 static NSString *client_model = nil;
 static NSMenuItem *display_item = nil;
+static NSMenuItem *fullscreen_item = nil;
+static bool (*fullscreen_on_connect_get)(void) = NULL;
+static void (*fullscreen_on_connect_set)(bool enable) = NULL;
 static void (*display_handler)(int index) = NULL;
 static NSInteger selected_display = -1;
 
@@ -68,6 +71,7 @@ static void rebuild_display_menu (id target);
 - (void) volumeChanged: (id) sender;
 - (void) progressChanged: (id) sender;
 - (void) displayChosen: (id) sender;
+- (void) fullscreenOnConnectToggled: (id) sender;
 - (void) menuWillOpen: (NSMenu *) menu;
 @end
 
@@ -90,6 +94,13 @@ static void rebuild_display_menu (id target);
 - (void) menuWillOpen: (NSMenu *) menu
 {
     rebuild_display_menu (self);
+}
+
+- (void) fullscreenOnConnectToggled: (id) sender
+{
+    if (fullscreen_on_connect_get && fullscreen_on_connect_set) {
+        fullscreen_on_connect_set (!fullscreen_on_connect_get ());
+    }
 }
 
 /* The tag carries the index into [NSScreen screens]. */
@@ -307,6 +318,13 @@ rebuild_display_menu (id target)
         [item setState: (selected_display == (NSInteger) i) ? NSControlStateValueOn
                                                             : NSControlStateValueOff];
     }
+    if (fullscreen_on_connect_get) {
+        [fullscreen_item setState: (fullscreen_on_connect_get () ? NSControlStateValueOn
+                                                                : NSControlStateValueOff)];
+        [fullscreen_item setHidden: NO];
+    } else {
+        [fullscreen_item setHidden: YES];
+    }
     [display_item setSubmenu: submenu];
     [submenu release];
     /* One display is no choice at all. */
@@ -400,6 +418,12 @@ statusbar_init (void)
         }
 
         [menu addItem: [NSMenuItem separatorItem]];
+
+        fullscreen_item = [menu addItemWithTitle: @"Fullscreen on connect"
+                                          action: @selector(fullscreenOnConnectToggled:)
+                                   keyEquivalent: @""];
+        [fullscreen_item setTarget: target];
+        [fullscreen_item setHidden: YES];
 
         display_item = [menu addItemWithTitle: @"Display"
                                        action: nil
@@ -553,6 +577,13 @@ void
 statusbar_set_display_handler (void (*handler)(int index))
 {
     display_handler = handler;
+}
+
+void
+statusbar_set_fullscreen_on_connect_hooks (bool (*get)(void), void (*set)(bool enable))
+{
+    fullscreen_on_connect_get = get;
+    fullscreen_on_connect_set = set;
 }
 
 void

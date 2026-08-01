@@ -64,13 +64,14 @@ bool video_renderer_take_window_closed ();
    started with, so a process launched hidden or minimised renders a stream
    nobody can see. Called whenever a pipeline reaches PLAYING. */
 void video_renderer_show_window ();
+#endif
 
-/* Whether a starting stream takes the screen, the way the macOS build does
-   through uxvideosink's start-fullscreen. On by default; the tray menu offers
-   it as something to switch off. */
+/* Whether a starting stream takes the screen. On Windows the renderer drives
+   the sink's window itself; on macOS this is uxvideosink's start-fullscreen,
+   read when a stream begins, so switching it applies from the next session.
+   Both menus offer it as something to turn off. */
 bool video_renderer_get_fullscreen_on_connect ();
 void video_renderer_set_fullscreen_on_connect (bool enable);
-#endif
 
 /* Called with the key name for each key pressed in the video window, as
    reported by the videosink through GstNavigation. */

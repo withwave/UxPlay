@@ -49,6 +49,12 @@ void statusbar_set_volume_handler(void (*handler)(double fraction));
    system reports. The menu hides itself when there is only one. */
 void statusbar_set_display_handler(void (*handler)(int index));
 
+/* Whether a starting stream takes the screen. The menu shows a tick against
+   the current setting, so it reads through the getter each time it opens
+   rather than keeping a copy that could drift from the renderer's. */
+void statusbar_set_fullscreen_on_connect_hooks(bool (*get)(void),
+                                               void (*set)(bool enable));
+
 /* Invoked when "Disconnect" is chosen. Expected to end the session and leave
    the server advertising. */
 void statusbar_set_disconnect_handler(void (*handler)(void));

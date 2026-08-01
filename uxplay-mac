@@ -32,6 +32,14 @@ VIDEOSINK='uxvideosink force-aspect-ratio=true start-fullscreen=true hide-until-
 # the audio drift. The frame drops it is meant to cure are QoS drops, which the
 # two options above fix properly.
 
+# Send AirPlay to another device and back and the returning one connects before
+# the old session's TEARDOWN has arrived, so it meets a server that still counts
+# itself busy and is refused with 409 -- at which point it gives up rather than
+# retrying. Letting a new client take over turns that race into a handover.
+# The cost is that any client can take the session, which for a receiver you
+# walk up to and use is the behaviour you want anyway.
+HANDOVER='-nohold'
+
 # Find the binary: prefer one sitting next to this script (a build tree),
 # otherwise whatever is on PATH.
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -47,8 +55,8 @@ fi
 # Let the caller pick the sink instead, if they want to.
 for arg in "$@"; do
     if [ "$arg" = "-vs" ]; then
-        exec "$UXPLAY" -hls "$@"
+        exec "$UXPLAY" -hls $HANDOVER "$@"
     fi
 done
 
-exec "$UXPLAY" -hls -vs "$VIDEOSINK" "$@"
+exec "$UXPLAY" -hls $HANDOVER -vs "$VIDEOSINK" "$@"

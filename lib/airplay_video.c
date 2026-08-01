@@ -523,6 +523,29 @@ char * select_master_playlist_language(airplay_video_t *airplay_video, char *mas
     return new_master_playlist;
 }
 
+/* "Already downloaded and stored" has to mean all of it. The uri table is
+   built from the master playlist as soon as it arrives, and the media playlists
+   it names are fetched one at a time afterwards, so an entry can hold a master
+   and a table of empty slots. Reusing one of those skips the fetch entirely and
+   leaves the local HLS server answering 404 for the variant the demuxer picks --
+   measured: 1134 requests for one media playlist, all refused, the demuxer
+   retrying for as long as the process lived. */
+bool playlists_are_complete(airplay_video_t *airplay_video) {
+    if (!airplay_video || !airplay_video->master_playlist ||
+        !airplay_video->media_data_store || airplay_video->num_uri <= 0) {
+        return false;
+    }
+    for (int i = 0; i < airplay_video->num_uri; i++) {
+        int n = airplay_video->media_data_store[i].num;
+
+        if (n < 0 || n >= airplay_video->num_uri ||
+            !airplay_video->media_data_store[n].playlist) {
+            return false;
+        }
+    }
+    return true;
+}
+
 char *get_master_playlist(airplay_video_t *airplay_video) {
     return  airplay_video->master_playlist;
 }

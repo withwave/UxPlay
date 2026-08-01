@@ -59,6 +59,7 @@ void store_master_playlist(airplay_video_t *airplay_video, char *master_playlist
 char *select_master_playlist_language(airplay_video_t *airplay_video, char *master_playlist);
 int store_media_playlist(airplay_video_t *airplay_video, char *media_playlist, int *count, float *duration, bool*endlist, int num);
 char *get_master_playlist(airplay_video_t *airplay_video);
+bool playlists_are_complete(airplay_video_t *airplay_video);
 char *get_media_playlist(airplay_video_t *airplay_video, int *count, float *duration, const char *uri);
 
 void destroy_media_data_store(airplay_video_t *airplay_video);

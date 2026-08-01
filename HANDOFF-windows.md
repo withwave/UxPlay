@@ -30,6 +30,17 @@ build/uxplay.exe -n UxPlay-Tray -hls -nohold -d
 
 약 230MB. 검증은 **PATH에서 MSYS2를 완전히 뺀 채** 실행해 볼 것 — 빠뜨린 DLL은 그때만 드러난다.
 
+### 서명이 없어서 막히는 것
+
+배포본에 코드 서명이 없다. 막히는 방식이 둘이고 성질이 전혀 다르다.
+
+- **SmartScreen** ("Windows의 PC 보호" 파란 창) — `추가 정보` → `실행`으로 지나간다. 압축 풀기 전에 zip을 `Unblock-File`로 풀어 두면 안의 파일에 표식이 남지 않아 아예 뜨지 않는다.
+- **Smart App Control** (Windows 11) — **앱별 예외가 없다.** 차단 해제도, 자체 서명도 통과하지 못한다. 서명된 앱이거나 마이크로소프트가 평판을 인정한 앱만 실행된다. 실기 확인: Win11 PC에서 이것에 막혔고, 기능을 끄자 실행됐다.
+
+SAC는 **한 번 끄면 Windows를 재설치하기 전에는 다시 켤 수 없다.** 상태는 `HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy`의 `VerifiedAndReputablePolicyState`로 본다 (`1` 켜짐, `2` 평가, `0` 꺼짐). Win11을 새로 설치한 PC에서만 기본으로 켜지므로, 업그레이드한 PC에서 시험하면 이 문제를 못 본다 — 개발 PC에서 멀쩡하던 것이 남의 PC에서 안 되는 이유가 이것이다.
+
+끄게 하지 않으려면 정식 코드서명 인증서로 서명하는 수밖에 없다. EV는 SmartScreen 평판을 즉시 얻고 SAC도 통과하지만 하드웨어 토큰과 연 비용이 든다. OV는 싸지만 평판을 쌓는 데 시간이 걸리고 SAC 통과가 보장되지 않는다. `signtool`은 Windows SDK와 함께 이 PC에 이미 있다.
+
 ## 이 브랜치가 Windows에 더한 것
 
 - **트레이 상태 아이템** (`renderers/windows_tray.{c,h}`) — 맥 메뉴바 아이템과 같은 API. 클라이언트 이름·상태, 볼륨, 곡 정보, Display 선택, `Fullscreen on connect`, `Console window`, Disconnect, Quit

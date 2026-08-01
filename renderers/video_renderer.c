@@ -81,7 +81,9 @@ static gboolean hls_seek_enabled = FALSE;
    because video_renderer_init has to put the choice back on a rebuilt sink. */
 static gboolean fullscreen_on_connect;
 static gboolean fullscreen_on_connect_seeded;
+static gint selected_display;
 static void video_renderer_set_sink_property(const char *name, ...);
+static void apply_sink_preferences(GstElement *sink, const char *what);
 #endif
 static gboolean hls_playing = FALSE;
 static gboolean hls_buffer_empty = FALSE;
@@ -285,6 +287,33 @@ g_string_replace (GString     *string,
 }
 #endif
 
+#ifndef _WIN32
+/* The menu's settings live on the videosink, and the videosink is built afresh
+   for every session from the -vs line -- so anything chosen has to be put back
+   or the command line quietly wins it again on the next connection. Only what
+   the user has actually chosen is forced; before that the -vs line is the
+   setting.
+
+   Takes the element rather than looking it up, because the two callers catch
+   the sink at different moments: playbin's is not in the pipeline yet, and the
+   mirroring one is only known once the codec has been decided. */
+static void apply_sink_preferences(GstElement *sink, const char *what) {
+    if (!sink) {
+        return;
+    }
+    if (fullscreen_on_connect_seeded) {
+        g_object_set(G_OBJECT(sink), "start-fullscreen", fullscreen_on_connect, NULL);
+        logger_log(logger, LOGGER_DEBUG, "start-fullscreen forced to %s by the menu (%s)",
+                   fullscreen_on_connect ? "true" : "false", what);
+    }
+    if (selected_display >= 0) {
+        g_object_set(G_OBJECT(sink), "display-index", selected_display, NULL);
+        logger_log(logger, LOGGER_DEBUG, "display forced to %d by the menu (%s)",
+                   selected_display + 1, what);
+    }
+}
+#endif
+
 void video_renderer_init(logger_t *render_logger, const char *server_name, videoflip_t videoflip[2], const char *parser, const char * rtp_pipeline,
                           const char *decoder, const char *converter, const char *videosink, const char *videosink_options, 
                           bool initial_fullscreen, bool video_sync, bool h265_support, bool coverart_support, guint playbin_version, const char *uri) {
@@ -385,19 +414,13 @@ void video_renderer_init(logger_t *render_logger, const char *server_name, video
                 } else {
                     logger_log(logger, LOGGER_DEBUG, "video_renderer_init: create playbin_videosink at %p", playbin_videosink);
 #ifndef _WIN32
-                    /* Put the menu's choice back on the sink that has just been
-                       built from the -vs line. It has to happen here, on the
-                       element itself: playbin has not adopted it yet, so looking
-                       the sink up in the pipeline by property finds nothing and
-                       the override is silently dropped -- which is why turning
-                       the setting off still came up fullscreen. */
-                    if (fullscreen_on_connect_seeded) {
-                        g_object_set(G_OBJECT(playbin_videosink), "start-fullscreen",
-                                     fullscreen_on_connect, NULL);
-                        logger_log(logger, LOGGER_DEBUG,
-                                   "video_renderer_init: start-fullscreen forced to %s by the menu",
-                                   fullscreen_on_connect ? "true" : "false");
-                    }
+                    /* The sink has just been built from the -vs line, so the
+                       menu's choices have to be put back on it. On the element
+                       itself: playbin has not adopted it yet, so looking the
+                       sink up inside the pipeline finds nothing and the
+                       override is dropped without a word -- which is why
+                       turning fullscreen off still came up fullscreen. */
+                    apply_sink_preferences(playbin_videosink, "hls");
 #endif
                     g_object_set(G_OBJECT (renderer_type[i]->pipeline), "video-sink", playbin_videosink, NULL);
                 }
@@ -1263,8 +1286,15 @@ void video_renderer_set_display(int index) {
     logger_log(logger, LOGGER_INFO, "moved the video window to display %d", index + 1);
 }
 #else
-/* Which display the video window sits on. -1 leaves it where it is. */
+/* Which display the video window sits on. -1 leaves it where it is.
+
+   Remembered here rather than only in the caller, because the sink this has to
+   reach is rebuilt for every session and the renderer is the only thing that
+   knows when that has happened. */
+static gint selected_display = -1;
+
 void video_renderer_set_display(int index) {
+    selected_display = index;
     video_renderer_set_sink_property("display-index", (gint) index, NULL);
 }
 
@@ -1875,6 +1905,23 @@ int video_renderer_choose_codec (bool video_is_jpeg, bool video_is_h265) {
         return -1;
     }
     renderer = renderer_used;
+#ifndef _WIN32
+    /* The one moment the surviving mirroring pipeline is known. Its sink came
+       out of gst_parse_launch with the rest of it, so there was no creation to
+       catch -- and video_renderer_start() ends the mirroring branch with
+       renderer = NULL, so anything applied before here goes through
+       video_renderer_set_sink_property() and is dropped on the floor. Ahead of
+       PLAYING, which is what start-fullscreen is read on. */
+    {
+        GstElement *sink = find_element_with_property(GST_BIN(renderer->pipeline),
+                                                      "start-fullscreen");
+
+        if (sink) {
+            apply_sink_preferences(sink, renderer->codec);
+            gst_object_unref(sink);
+        }
+    }
+#endif
     gst_element_set_state (renderer->pipeline, GST_STATE_PLAYING);
     GstState old_state, new_state;
     if (gst_element_get_state(renderer->pipeline, &old_state, &new_state, 100 * GST_MSECOND) == GST_STATE_CHANGE_FAILURE) {

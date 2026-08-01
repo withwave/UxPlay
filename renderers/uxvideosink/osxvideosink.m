@@ -171,6 +171,21 @@ gst_osx_video_sink_osxwindow_create (GstOSXVideoSink * osxvideosink, gint width,
   [osxwindow->gstview setNavigation: GST_NAVIGATION(osxvideosink)];
   [osxvideosink->osxwindow->gstview setKeepAspectRatio: osxvideosink->keep_par];
   [osxvideosink->osxwindow->gstview setFillMode: osxvideosink->fill_mode];
+  /* Replayed here because the property can arrive before there is a window to
+     carry it: its setter forwards to the view only when one exists, and nothing
+     put it back afterwards, so a display chosen while nothing was playing was
+     lost the moment the window it was meant for appeared.
+
+     Onto the main thread, unlike the three above. Those only set ivars; this
+     one moves the window, and calling AppKit from the streaming thread this
+     runs on kills the process outright -- SIGILL inside
+     -[NSWindow _setFrameCommon:display:]. */
+  if (osxvideosink->display_index >= 0) {
+    [osxvideosink->osxwindow->gstview
+        performSelectorOnMainThread: @selector(setDisplayIndex:)
+                         withObject: [NSNumber numberWithInt: osxvideosink->display_index]
+                      waitUntilDone: NO];
+  }
 
   gst_osx_video_sink_call_from_main_thread (osxvideosink,
       osxvideosink->osxvideosinkobject, @selector(createStatusItem), (id) nil,
@@ -542,6 +557,10 @@ gst_osx_video_sink_init (GstOSXVideoSink * sink)
   sink->keep_par = FALSE;
   sink->fill_mode = GST_OSX_FILL_FIT;
   sink->start_fullscreen = FALSE;
+  /* -1: leave the window on whichever display it opens on. Without this the
+     field starts at zero from g_object_new's zeroing, which reads as "display
+     1" and would move every window there. */
+  sink->display_index = -1;
   sink->hide_until_stream = FALSE;
   sink->status_item = FALSE;
   sink->volume_osd = 1.0;

@@ -859,19 +859,20 @@ http_handler_play(raop_conn_t *conn, http_request_t *request, http_response_t *r
     int id = -1;
     id = get_playlist_by_uuid(raop, playback_uuid);
 
-    /* A stored entry is only worth reusing if the playlist actually arrived.
-       The uuid is recorded as soon as the entry is made, before the request for
-       the master playlist goes out over the reverse channel, so a session torn
-       down in between -- measured: the request sent, TEARDOWN a moment later,
-       the client never answering -- leaves an entry that matches by uuid and
-       holds nothing. Every later /play for that video then reused it, skipped
-       the fetch, and left the local HLS server answering 404 for the rest of
-       the process's life: the video would not start again until UxPlay was
+    /* A stored entry is only worth reusing if all of it actually arrived. The
+       uuid is recorded as soon as the entry is made, before the request for the
+       master playlist goes out over the reverse channel, and the media
+       playlists it names are fetched one by one after that -- so a session torn
+       down anywhere in the middle leaves an entry that matches by uuid and is
+       missing either the master or some of the variants. Measured, both:
+       a request sent and TEARDOWN a moment later with the client never
+       answering, and later an entry holding a master whose itag 614 was never
+       filled, refused 1134 times while the demuxer kept asking. Either way the
+       fetch was skipped and the video would not start again until UxPlay was
        restarted. Throw such an entry away and fetch it properly. */
-    if (id >= 0 && !get_master_playlist(raop->airplay_video[id])) {
+    if (id >= 0 && !playlists_are_complete(raop->airplay_video[id])) {
         logger_log(raop->logger, LOGGER_INFO,
-                   "stored playlist %s never received its master playlist; fetching it again",
-                   playback_uuid);
+                   "stored playlist %s is incomplete; fetching it again", playback_uuid);
         raop_destroy_airplay_video(raop, id);
         id = -1;
     }

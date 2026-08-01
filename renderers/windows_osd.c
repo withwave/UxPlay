@@ -54,6 +54,7 @@ static double osd_position = 0.0;
 static double osd_duration = 0.0;
 static double osd_rate = 1.0;
 static gint64 controls_expiry = 0;      /* g_get_monotonic_time() units */
+static gint64 last_draw_us = 0;         /* when a frame last carried the overlay */
 static int frame_width = 0;
 static int frame_height = 0;
 static gboolean volume_dragging = FALSE;
@@ -197,6 +198,20 @@ static osd_rect_t close_button_rect(void) {
 
 static gboolean point_in(const osd_rect_t *r, double x, double y) {
     return (x >= r->x && x <= r->x + r->w && y >= r->y && y <= r->y + r->h);
+}
+
+/* How long without a frame before what is on screen counts as a still. Longer
+   than any gap ordinary playback produces, short enough that a user who has
+   just watched the picture stop does not wait on it. */
+#define FROZEN_AFTER_US (G_GINT64_CONSTANT(1000000))
+
+/* Caller holds osd_lock. TRUE once the picture has stopped moving, so the
+   frame on screen -- overlay and all -- is the last one drawn. */
+static gboolean picture_frozen(void) {
+    if (!last_draw_us) {
+        return FALSE;
+    }
+    return (g_get_monotonic_time() - last_draw_us) > FROZEN_AFTER_US;
 }
 
 /* Caller holds osd_lock. 0 when the controls are down. */
@@ -440,6 +455,7 @@ static void on_draw(GstElement *overlay, cairo_t *cr, guint64 timestamp,
     (void) user_data;
 
     g_mutex_lock(&osd_lock);
+    last_draw_us = g_get_monotonic_time();
     alpha = controls_alpha();
     have_panel = panel_rect(&panel);
     position = scrubbing ? scrub_position : osd_position;
@@ -766,9 +782,14 @@ bool windows_osd_handle_navigation(GstEvent *event) {
             return false;
         }
         g_mutex_lock(&osd_lock);
-        /* Only while the controls are actually showing, so a click on the
-           picture is not swallowed by an invisible target. */
-        if (controls_alpha() > 0.0) {
+        /* The close button answers while the controls are showing, and goes on
+           answering once the picture has stopped. The overlay is painted onto
+           the frames, so when they stop the last one stays on screen with the
+           controls in it -- while the fade that governs this hit test runs out
+           underneath, on a clock of its own. The button is then plainly there
+           and does nothing, which is the worst way for the one control meant
+           for a session in trouble to behave. */
+        if (controls_alpha() > 0.0 || picture_frozen()) {
             osd_rect_t close = close_button_rect();
 
             if (point_in(&close, x, y)) {
@@ -789,6 +810,13 @@ bool windows_osd_handle_navigation(GstEvent *event) {
                 }
                 return true;
             }
+        }
+        /* The rest keep the original rule: only while the controls are really
+           showing, so a click on the picture is not swallowed by an invisible
+           target. They are worth reaching only while the picture is moving,
+           and one that seeks or moves the volume unseen is worse than one that
+           does nothing. */
+        if (controls_alpha() > 0.0) {
             consumed = begin_interaction(x, y, &pending_key, &want_fullscreen);
             if (volume_dragging) {
                 commit_volume = osd_volume;

@@ -181,8 +181,29 @@ Windows 트레이에 있던 스위치를 맥 메뉴바에도 붙였다. 훅 API�
 확인: 세션 3회에서 `start-fullscreen forced to {false,true,false} by the menu`가 로그에 찍히고
 동작도 일치.
 
-**미러링(비-HLS) 경로에는 걸려 있지 않다.** 그쪽은 `gst_parse_launch`가 문자열에서 싱크까지
-만들므로 가로챌 지점이 다르다. HLS만 적용된다.
+**미러링에도 적용된다** (모니터 선택과 함께). 두 설정은 `apply_sink_preferences()` 한 곳에서
+처리하고, 싱크를 찾지 않고 **넘겨받는다** — 두 호출자가 서로 다른 순간에 싱크를 잡기 때문이다:
+
+| 경로 | 적용 시점 | 왜 거기여야 하나 |
+|---|---|---|
+| HLS | `make_video_sink()` 반환 직후 | playbin이 아직 품기 전이라 파이프라인에서 못 찾는다 |
+| 미러링 | `video_renderer_choose_codec()`의 `renderer = renderer_used` 직후 | 싱크가 `gst_parse_launch`로 만들어져 가로챌 생성 시점이 없다. 게다가 `video_renderer_start()`의 미러링 분기는 **`renderer = NULL`로 끝나므로**, 그 전에 무엇을 걸든 `video_renderer_set_sink_property()`가 조용히 버린다. 살아남은 파이프라인이 확정되는 유일한 순간이고 PLAYING 직전이다 |
+
+launch 문자열에 `start-fullscreen=false`를 덧붙이는 방법은 쓰지 말 것 — 속성이 없는 싱크에서
+`gst_parse_launch`가 **실패**해 파이프라인이 통째로 깨진다. `g_object_set`은 경고만 내지만 파서는
+에러다.
+
+**창이 생길 때 모니터 선택을 다시 밀어준다.** 싱크의 setter는 창이 있을 때만 뷰로 넘기고 나중에
+replay하는 코드가 없었다. 재생 중이 아닐 때 고른 모니터는 창이 생기는 순간 사라졌다.
+
+**그 replay는 반드시 `performSelectorOnMainThread:`로.** `setDisplayIndex:`는
+`[win setFrame:display:]`로 AppKit을 만진다. 창 생성 함수는 GStreamer 스트리밍 스레드에서 도므로
+직접 부르면 **SIGILL로 프로세스가 죽는다** (`-[NSWindow _setFrameCommon:display:]` 안에서). 바로 옆의
+`setNavigation:`·`setKeepAspectRatio:`·`setFillMode:`는 ivar만 세우기 때문에 직접 불러도 되는
+것이고, 그 줄들을 보고 같은 자리에 끼워 넣으면 이 함정에 빠진다.
+
+`sink->display_index`는 `-1`로 초기화해야 한다. `g_object_new`의 0으로 시작하면 `>= 0` 검사에
+"모니터 1번"으로 읽혀 모든 창을 거기로 옮긴다.
 
 ### 미해결: 영상이 끝났다는 것을 클라이언트에 알릴 방법
 

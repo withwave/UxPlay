@@ -35,7 +35,7 @@ build/uxplay.exe -n UxPlay-Tray -hls -nohold -d
 - **트레이 상태 아이템** (`renderers/windows_tray.{c,h}`) — 맥 메뉴바 아이템과 같은 API. 클라이언트 이름·상태, 볼륨, 곡 정보, Display 선택, `Fullscreen on connect`, `Console window`, Disconnect, Quit
 - **화면 위 재생 패널** (`renderers/windows_osd.{c,h}`) — cairooverlay로 그린다. 볼륨, `|◀ ◀◀ ▮▮ ▶▶ ▶|`, 전체화면, 스크러버, 닫기 버튼
 - **키** — 창 프로시저에서 받는다. `←/→` 10초 이동, `↑/↓` 볼륨 1/16, `Enter/Esc` 전체화면 진입·해제, `Space` 재생·정지
-- **이전/다음 항목** — `dacp_resolve()`를 최소 mDNS SRV 조회로 대체해 `HAVE_DNS_SD` 없이 동작하게 했다. **실기 미검증**
+- **이전/다음 항목** — `dacp_resolve()`를 최소 mDNS SRV 조회로 대체해 `HAVE_DNS_SD` 없이 동작하게 했다. 번들 `mdnsd`는 등록만 되고 browse/resolve가 없어 이 경로가 통째로 빠져 있었다. 실기 확인: 양방향 모두 `dacp_remote: {next,prev}item -> OK` 뒤에 앱이 `playlistRemove` → `/stop` → 새 `/play`로 응답
 
 ## 반드시 알아야 할 것
 
@@ -80,6 +80,5 @@ build/uxplay.exe -n UxPlay-Tray -hls -nohold -d
 ## 남은 작업
 
 - OSD 닫기 버튼의 클릭 감지를 파이프라인에서 떼기
-- 이전/다음 항목(DACP) 실기 검증
 - 하드웨어 디코더를 실제로 배제할지 결정 (위 `force-sw-decoders` 참조)
 - 배포본 만들기를 스크립트로 (지금은 수동 절차)

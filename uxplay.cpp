@@ -65,8 +65,15 @@
 #include "lib/logger.h"
 #include "lib/crypto.h"
 #include "renderers/video_renderer.h"
+/* Status item in the macOS menu bar, notification-area icon on Windows. The
+   two carry the same information and offer the same actions, so the call sites
+   below are shared and only the backend differs. */
 #ifdef __APPLE__
 #include "renderers/macos_statusbar.h"
+#define UXPLAY_STATUSBAR 1
+#elif defined(_WIN32)
+#include "renderers/windows_tray.h"
+#define UXPLAY_STATUSBAR 1
 #endif
 #include "renderers/audio_renderer.h"
 #include "renderers/mux_renderer.h"
@@ -105,8 +112,8 @@ static bool video_sync = true;
 static int64_t audio_delay_alac = 0;
 static int64_t audio_delay_aac = 0;
 static bool relaunch_video = false;
-#ifdef __APPLE__
-/* Mirrored so the AppKit call only happens when the state actually changes:
+#ifdef UXPLAY_STATUSBAR
+/* Mirrored so the backend call only happens when the state actually changes:
    video_process() runs per frame. */
 static statusbar_state_t statusbar_state = STATUSBAR_IDLE;
 static void statusbar_update(statusbar_state_t state) {
@@ -197,7 +204,7 @@ static unsigned short airplay_port;
 static uint64_t remote_clock_offset = 0;
 static std::vector<std::string> allowed_clients;
 static std::vector<std::string> blocked_clients;
-/* A client whose session was just ended from the menu bar. iOS re-offers the
+/* A client whose session was just ended from the status item. iOS re-offers the
    connection immediately if mirroring is still switched on at its end, so
    without a short refusal window "Disconnect" looks like it did nothing. */
 static std::string current_deviceid;
@@ -727,7 +734,24 @@ static gboolean video_eos_watch_callback (gpointer loop) {
 
 #define MAX_VIDEO_RENDERERS 3
 #define MAX_AUDIO_RENDERERS 2
-#ifdef __APPLE__
+/* Where the stream was the last time the client asked, so the transport
+   buttons drawn over the video have something to skip from. Reported to the
+   videosink on every platform, so it lives outside the status-item guard. */
+static double last_playback_position = 0.0;
+
+/* Which display the video window sits on. Remembered so a window built for the
+   next session opens where the last one was put. */
+static int selected_display_index = -1;
+
+/* The window is rebuilt per session, so the choice has to be re-applied to it;
+   the sink's own default is "wherever it opened". */
+static void apply_selected_display(void) {
+    if (use_video && selected_display_index >= 0) {
+        video_renderer_set_display(selected_display_index);
+    }
+}
+
+#ifdef UXPLAY_STATUSBAR
 static void statusbar_volume_changed(double fraction) {
     double db, gst_volume;
 
@@ -751,10 +775,6 @@ static void statusbar_volume_changed(double fraction) {
         video_renderer_show_volume(fraction);
     }
 }
-
-/* Where the stream was the last time the client asked, so the transport
-   buttons drawn over the video have something to skip from. */
-static double last_playback_position = 0.0;
 
 /* The arrow keys step by 1/16, which is the granularity of the AirPlay volume
    control itself, so the two stay on the same notches. */
@@ -845,10 +865,6 @@ static void statusbar_seek_requested(double position) {
     }
 }
 
-/* Which display the video window sits on. Remembered so a window built for the
-   next session opens where the last one was put. */
-static int selected_display_index = -1;
-
 static void statusbar_display_requested(int index) {
     selected_display_index = index;
     if (use_video) {
@@ -856,26 +872,35 @@ static void statusbar_display_requested(int index) {
     }
 }
 
-/* The window is rebuilt per session, so the choice has to be re-applied to it;
-   the sink's own default is "wherever it opened". */
-static void apply_selected_display(void) {
-    if (use_video && selected_display_index >= 0) {
-        video_renderer_set_display(selected_display_index);
-    }
-}
-
 static void statusbar_disconnect_requested(void) {
     /* Same shape as closing the video window: end the session, keep serving. */
-    LOGI("Disconnect requested from the menu bar");
+    LOGI("Disconnect requested from the status item");
     disconnected_deviceid = current_deviceid;
     disconnected_until = time(NULL) + 8;
     reset_httpd = true;
     full_video_reset = true;
     relaunch_video = true;
     /* Quitting the loop is left to reset_callback(), which runs on the loop's
-       own thread; this handler is called from the AppKit main thread. */
+       own thread; this handler is called from whichever thread owns the status
+       item -- the AppKit main thread on macOS, the tray's message pump on
+       Windows. */
     reset_loop = true;
 }
+
+#ifdef _WIN32
+/* "Quit UxPlay" from the tray. The macOS item raises SIGINT and lets the
+   existing handler take it from there; the Windows shutdown path hangs off a
+   console control handler, which nothing but the console can trigger, so the
+   same teardown is offered to the tray directly. Body is CtrlHandler's. */
+static void statusbar_quit_requested(void) {
+    if (gmainloop) {
+        g_idle_add(handle_signal, NULL);
+    } else {
+        cleanup();
+        exit(0);
+    }
+}
+#endif
 #endif
 
 static void main_loop()  {
@@ -2444,7 +2469,7 @@ extern "C" void conn_destroy (void *cls) {
     LOGD("Open connections: %i", open_connections);
     if (open_connections == 0) {
         statusbar_update(STATUSBAR_IDLE);
-#ifdef __APPLE__
+#ifdef UXPLAY_STATUSBAR
         statusbar_set_client(NULL, NULL);
 #endif
         if (use_video) {
@@ -2500,11 +2525,11 @@ extern "C" void report_client_request(void *cls, char *deviceid, char * model, c
     LOGI("connection request from %s (%s) with deviceID = %s\n", name, model, deviceid);
     current_deviceid = deviceid;
     if (disconnected_deviceid == deviceid && time(NULL) < disconnected_until) {
-        LOGI("client was disconnected from the menu bar: refusing until it stops offering");
+        LOGI("client was disconnected from the status item: refusing until it stops offering");
         *admit = false;
         return;
     }
-#ifdef __APPLE__
+#ifdef UXPLAY_STATUSBAR
     statusbar_set_client(name, model);
 #endif
     if (restrict_clients) {
@@ -2649,7 +2674,7 @@ extern "C" void audio_set_volume (void *cls, float volume) {
         frac = (frac > 1.0) ? 1.0 : frac;
     }
 
-#ifdef __APPLE__
+#ifdef UXPLAY_STATUSBAR
     volume_fraction = frac;
     statusbar_set_volume(frac);
     /* The panel drawn over the video reads its level from the sink, so a volume
@@ -2790,7 +2815,7 @@ extern "C" void audio_set_metadata(void *cls, const void *buffer, int buflen) {
     if (buflen != 0) {
         LOGE("%d bytes of metadata were not processed", buflen);
     }
-#ifdef __APPLE__
+#ifdef UXPLAY_STATUSBAR
     statusbar_set_metadata(track_title.length() ? track_title.c_str() : NULL,
                            artist.length() ? artist.c_str() : NULL);
 #endif
@@ -2852,7 +2877,7 @@ extern "C" void on_video_play(void *cls, const char* location, const float start
         raop_announce_seek(raop);
     }
     /* HLS goes through neither video_process() nor audio_process(), so without
-       this the menu bar sits at "waiting for a client" throughout playback and
+       this the status item sits at "waiting for a client" throughout playback and
        the progress row never appears. */
     statusbar_update(STATUSBAR_VIDEO);
     url.erase();
@@ -2919,7 +2944,7 @@ extern "C" void on_video_acquire_playback_info (void *cls, playback_info_t *play
                                                  &playback_info->playback_buffer_full);
     playback_info->ready_to_play = true; //?
     playback_info->playback_likely_to_keep_up = true; //?
-#ifdef __APPLE__
+#ifdef UXPLAY_STATUSBAR
     statusbar_set_progress(playback_info->position, playback_info->duration);
 #endif
     if (use_video) {
@@ -3515,12 +3540,20 @@ int main (int argc, char *argv[]) {
         stop_dnssd();
         cleanup();
     }
-#ifdef __APPLE__
+#ifdef UXPLAY_STATUSBAR
     statusbar_init();
     statusbar_set_volume_handler(statusbar_volume_changed);
     statusbar_set_disconnect_handler(statusbar_disconnect_requested);
     statusbar_set_seek_handler(statusbar_seek_requested);
     statusbar_set_display_handler(statusbar_display_requested);
+#ifdef _WIN32
+    statusbar_set_quit_handler(statusbar_quit_requested);
+    /* The tray is the interface; the console window only earns its place when
+       there is a debug log going into it. */
+    statusbar_setup_console(debug_log);
+    statusbar_set_fullscreen_on_connect_hooks(video_renderer_get_fullscreen_on_connect,
+                                              video_renderer_set_fullscreen_on_connect);
+#endif
     if (use_video) {
         video_renderer_set_key_handler(video_window_key_pressed);
     }
@@ -3578,7 +3611,7 @@ int main (int argc, char *argv[]) {
 }
  
 static void cleanup() {
-#ifdef __APPLE__
+#ifdef UXPLAY_STATUSBAR
     statusbar_destroy();
 #endif
     if (use_audio) {

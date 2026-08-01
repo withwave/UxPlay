@@ -58,6 +58,20 @@ void video_renderer_stop ();
    the caller can treat it as the end of a session rather than a shutdown. */
 bool video_renderer_take_window_closed ();
 
+#ifdef _WIN32
+/* Show the videosink's window if it is not up yet. The Direct3D sinks display
+   theirs with SW_SHOWDEFAULT, which resolves to whatever wShowWindow uxplay was
+   started with, so a process launched hidden or minimised renders a stream
+   nobody can see. Called whenever a pipeline reaches PLAYING. */
+void video_renderer_show_window ();
+
+/* Whether a starting stream takes the screen, the way the macOS build does
+   through uxvideosink's start-fullscreen. On by default; the tray menu offers
+   it as something to switch off. */
+bool video_renderer_get_fullscreen_on_connect ();
+void video_renderer_set_fullscreen_on_connect (bool enable);
+#endif
+
 /* Called with the key name for each key pressed in the video window, as
    reported by the videosink through GstNavigation. */
 void video_renderer_set_key_handler (void (*handler)(const char *key));

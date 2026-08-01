@@ -16,26 +16,30 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
+#include <time.h>
 #include <pthread.h>
 #include <unistd.h>
 #include <errno.h>
 
-#ifdef HAVE_DNS_SD
-
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <iphlpapi.h>
 #define DACP_CLOSESOCKET closesocket
 #else
 #include <sys/socket.h>
 #include <sys/select.h>
 #include <netdb.h>
 #include <arpa/inet.h>
+#include <netinet/in.h>
 #define DACP_CLOSESOCKET close
 #endif
 
+#ifdef HAVE_DNS_SD
 #include <dns_sd.h>
+#endif
 
 #define DACP_SERVICE_TYPE  "_dacp._tcp"
 #define DACP_DOMAIN        "local."
@@ -80,6 +84,8 @@ typedef struct {
     uint16_t port;
     bool resolved;
 } dacp_resolve_t;
+
+#ifdef HAVE_DNS_SD
 
 static void DNSSD_API
 dacp_resolve_reply(DNSServiceRef sdRef, DNSServiceFlags flags, uint32_t interface_index,
@@ -131,6 +137,271 @@ static bool dacp_resolve(const char *id, dacp_resolve_t *out) {
     return out->resolved;
 }
 
+#else  /* !HAVE_DNS_SD */
+
+/* The bundled mdnsd registers services but cannot browse or resolve, so this
+   asks the question itself: one multicast DNS query for the SRV record of
+   iTunes_Ctrl_<id>._dacp._tcp.local, and the port and address out of what comes
+   back. That is all DNSServiceResolve() is doing above, and it is little enough
+   to be worth doing by hand rather than taking on Bonjour as a dependency --
+   which is what the rest of UxPlay moved away from when it adopted mdnsd.
+ *
+ * The query sets the unicast-response bit, so replies arrive directly on this
+ * socket rather than on port 5353, which mdnsd already holds. */
+
+#define MDNS_PORT       5353
+#define MDNS_GROUP      "224.0.0.251"
+#define DNS_TYPE_A      1
+#define DNS_TYPE_SRV    33
+#define DNS_CLASS_IN    1
+#define DNS_QU_BIT      0x8000
+
+/* Appends "label1.label2..." in DNS wire form. Returns the new length, or -1. */
+static int dns_put_name(unsigned char *buf, int len, int cap, const char *name) {
+    const char *p = name;
+
+    while (*p) {
+        const char *dot = strchr(p, '.');
+        size_t part = dot ? (size_t) (dot - p) : strlen(p);
+
+        if (part == 0 || part > 63 || len + (int) part + 1 >= cap) {
+            return -1;
+        }
+        buf[len++] = (unsigned char) part;
+        memcpy(buf + len, p, part);
+        len += (int) part;
+        p += part;
+        if (*p == '.') {
+            p++;
+        }
+    }
+    if (len >= cap) {
+        return -1;
+    }
+    buf[len++] = 0;
+    return len;
+}
+
+/* Reads a name, following compression pointers. Writes a dotted string to out
+   when out is non-NULL. Returns the offset just past the name in the message,
+   or -1. */
+static int dns_read_name(const unsigned char *msg, int msg_len, int pos,
+                         char *out, int out_cap) {
+    int out_len = 0;
+    int jumped = 0;
+    int next = -1;
+    int guard = 0;
+
+    if (out && out_cap > 0) {
+        out[0] = '\0';
+    }
+    while (pos >= 0 && pos < msg_len) {
+        unsigned int len = msg[pos];
+
+        if (++guard > 128) {
+            return -1;              /* a pointer loop */
+        }
+        if ((len & 0xC0) == 0xC0) {
+            if (pos + 1 >= msg_len) {
+                return -1;
+            }
+            if (!jumped) {
+                next = pos + 2;
+                jumped = 1;
+            }
+            pos = ((int) (len & 0x3F) << 8) | msg[pos + 1];
+            continue;
+        }
+        pos++;
+        if (len == 0) {
+            return jumped ? next : pos;
+        }
+        if (pos + (int) len > msg_len) {
+            return -1;
+        }
+        if (out && out_len + (int) len + 2 < out_cap) {
+            if (out_len) {
+                out[out_len++] = '.';
+            }
+            memcpy(out + out_len, msg + pos, len);
+            out_len += (int) len;
+            out[out_len] = '\0';
+        }
+        pos += (int) len;
+    }
+    return -1;
+}
+
+/* Sends the same query out of every IPv4 interface. The machine may well have
+   several -- virtual switches from hypervisors are routinely ahead of the real
+   adapter in the routing order -- and the default multicast interface is then
+   one the client cannot hear. */
+static void mdns_send_query(int sock, const unsigned char *query, int query_len) {
+    struct sockaddr_in to;
+
+    memset(&to, 0, sizeof(to));
+    to.sin_family = AF_INET;
+    to.sin_port = htons(MDNS_PORT);
+    to.sin_addr.s_addr = inet_addr(MDNS_GROUP);
+
+#ifdef _WIN32
+    {
+        IP_ADAPTER_ADDRESSES *adapters = NULL, *a;
+        ULONG size = 16384;
+        ULONG flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
+                      GAA_FLAG_SKIP_DNS_SERVER;
+        int sent = 0;
+
+        adapters = (IP_ADAPTER_ADDRESSES *) malloc(size);
+        if (adapters &&
+            GetAdaptersAddresses(AF_INET, flags, NULL, adapters, &size) == NO_ERROR) {
+            for (a = adapters; a; a = a->Next) {
+                IP_ADAPTER_UNICAST_ADDRESS *u;
+
+                if (a->OperStatus != IfOperStatusUp ||
+                    a->IfType == IF_TYPE_SOFTWARE_LOOPBACK) {
+                    continue;
+                }
+                for (u = a->FirstUnicastAddress; u; u = u->Next) {
+                    struct sockaddr_in *sa = (struct sockaddr_in *) u->Address.lpSockaddr;
+
+                    if (!sa || sa->sin_family != AF_INET) {
+                        continue;
+                    }
+                    if (setsockopt(sock, IPPROTO_IP, IP_MULTICAST_IF,
+                                   (const char *) &sa->sin_addr,
+                                   sizeof(sa->sin_addr)) == 0) {
+                        sendto(sock, (const char *) query, query_len, 0,
+                               (struct sockaddr *) &to, sizeof(to));
+                        sent++;
+                    }
+                }
+            }
+        }
+        free(adapters);
+        if (sent) {
+            return;
+        }
+    }
+#endif
+    sendto(sock, (const char *) query, query_len, 0,
+           (struct sockaddr *) &to, sizeof(to));
+}
+
+/* Blocks for up to DACP_RESOLVE_SECS. */
+static bool dacp_resolve(const char *id, dacp_resolve_t *out) {
+    char wanted[256], target[256];
+    unsigned char query[512], reply[2048];
+    int sock, query_len, n;
+    struct sockaddr_in local;
+    struct timeval tv;
+    unsigned char ttl = 255;
+    int reuse = 1;
+    time_t deadline;
+
+    memset(out, 0, sizeof(*out));
+    snprintf(wanted, sizeof(wanted), "iTunes_Ctrl_%s.%s.%s", id,
+             DACP_SERVICE_TYPE, "local");
+    target[0] = '\0';
+
+    query[0] = 0; query[1] = 0;             /* id */
+    query[2] = 0; query[3] = 0;             /* flags: standard query */
+    query[4] = 0; query[5] = 1;             /* one question */
+    query[6] = 0; query[7] = 0;
+    query[8] = 0; query[9] = 0;
+    query[10] = 0; query[11] = 0;
+    query_len = dns_put_name(query, 12, (int) sizeof(query), wanted);
+    if (query_len < 0 || query_len + 4 > (int) sizeof(query)) {
+        return false;
+    }
+    query[query_len++] = 0;
+    query[query_len++] = DNS_TYPE_SRV;
+    query[query_len++] = (DNS_QU_BIT | DNS_CLASS_IN) >> 8;
+    query[query_len++] = (DNS_QU_BIT | DNS_CLASS_IN) & 0xFF;
+
+    sock = (int) socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (sock < 0) {
+        return false;
+    }
+    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, (const char *) &reuse, sizeof(reuse));
+    memset(&local, 0, sizeof(local));
+    local.sin_family = AF_INET;
+    local.sin_addr.s_addr = htonl(INADDR_ANY);
+    local.sin_port = 0;                     /* replies come back here */
+    if (bind(sock, (struct sockaddr *) &local, sizeof(local)) != 0) {
+        DACP_CLOSESOCKET(sock);
+        return false;
+    }
+    setsockopt(sock, IPPROTO_IP, IP_MULTICAST_TTL, (const char *) &ttl, sizeof(ttl));
+    tv.tv_sec = 1;
+    tv.tv_usec = 0;
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char *) &tv, sizeof(tv));
+
+    mdns_send_query(sock, query, query_len);
+
+    deadline = time(NULL) + DACP_RESOLVE_SECS;
+    while (time(NULL) < deadline) {
+        int pos, count, section;
+        unsigned int qd, an, ns, ar;
+
+        n = recv(sock, (char *) reply, (int) sizeof(reply), 0);
+        if (n < 12) {
+            continue;
+        }
+        qd = ((unsigned) reply[4] << 8) | reply[5];
+        an = ((unsigned) reply[6] << 8) | reply[7];
+        ns = ((unsigned) reply[8] << 8) | reply[9];
+        ar = ((unsigned) reply[10] << 8) | reply[11];
+
+        pos = 12;
+        for (count = 0; count < (int) qd && pos > 0; count++) {
+            pos = dns_read_name(reply, n, pos, NULL, 0);
+            pos = (pos > 0) ? pos + 4 : -1;
+        }
+        /* Answers, authority and additional all together: the SRV and the A it
+           needs usually arrive in different sections. */
+        for (section = 0; section < (int) (an + ns + ar) && pos > 0; section++) {
+            char name[256];
+            unsigned int type, rdlength;
+
+            pos = dns_read_name(reply, n, pos, name, (int) sizeof(name));
+            if (pos < 0 || pos + 10 > n) {
+                break;
+            }
+            type = ((unsigned) reply[pos] << 8) | reply[pos + 1];
+            rdlength = ((unsigned) reply[pos + 8] << 8) | reply[pos + 9];
+            pos += 10;
+            if (pos + (int) rdlength > n) {
+                break;
+            }
+            if (type == DNS_TYPE_SRV && rdlength >= 7 &&
+                !strcasecmp(name, wanted)) {
+                out->port = (uint16_t) (((unsigned) reply[pos + 4] << 8) | reply[pos + 5]);
+                dns_read_name(reply, n, pos + 6, target, (int) sizeof(target));
+                out->resolved = true;
+            } else if (type == DNS_TYPE_A && rdlength == 4 && target[0] &&
+                       !strcasecmp(name, target)) {
+                snprintf(out->host, sizeof(out->host), "%u.%u.%u.%u",
+                         reply[pos], reply[pos + 1], reply[pos + 2], reply[pos + 3]);
+            }
+            pos += (int) rdlength;
+        }
+        if (out->resolved && out->host[0]) {
+            break;                          /* both halves in hand */
+        }
+    }
+    DACP_CLOSESOCKET(sock);
+
+    if (out->resolved && !out->host[0] && target[0]) {
+        /* No address record came with it. Windows resolves .local names itself,
+           so the name is still worth handing to getaddrinfo. */
+        snprintf(out->host, sizeof(out->host), "%s", target);
+    }
+    return (out->resolved && out->host[0]);
+}
+
+#endif  /* HAVE_DNS_SD */
+
 /* Returns the HTTP status, or -1. */
 static int dacp_get(const dacp_resolve_t *addr, const char *command, const char *active_remote) {
     struct addrinfo hints, *list = NULL, *ai;
@@ -146,11 +417,11 @@ static int dacp_get(const dacp_resolve_t *addr, const char *command, const char 
         return -1;
     }
     for (ai = list; ai; ai = ai->ai_next) {
-        sock = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        sock = (int) socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
         if (sock < 0) {
             continue;
         }
-        if (!connect(sock, ai->ai_addr, ai->ai_addrlen)) {
+        if (!connect(sock, ai->ai_addr, (int) ai->ai_addrlen)) {
             break;
         }
         DACP_CLOSESOCKET(sock);
@@ -249,28 +520,3 @@ void dacp_remote_send(logger_t *logger, const char *command) {
     }
     pthread_attr_destroy(&attr);
 }
-
-#else  /* !HAVE_DNS_SD */
-
-/* The bundled mdnsd registers services but cannot browse or resolve, so the
-   client's DACP control server cannot be found. Everything still builds and the
-   commands simply report that they are unavailable. */
-
-void dacp_remote_set_client(const char *id, const char *active_remote) {
-    (void) id; (void) active_remote;
-}
-
-void dacp_remote_clear(void) {
-}
-
-bool dacp_remote_available(void) {
-    return false;
-}
-
-void dacp_remote_send(logger_t *logger, const char *command) {
-    logger_log(logger, LOGGER_WARNING,
-               "dacp_remote: \"%s\" needs dns_sd service resolution, which this build does not have",
-               command ? command : "");
-}
-
-#endif  /* HAVE_DNS_SD */

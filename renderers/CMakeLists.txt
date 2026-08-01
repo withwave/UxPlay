@@ -50,8 +50,16 @@ set( RENDERER_SOURCES
      video_renderer.c
      mux_renderer.c )
 
-# Menu bar status item: the only place a session is visible when it is
-# AirPlay Audio, which never opens a video window.
+# Status item -- the macOS menu bar, the Windows notification area. The only
+# place a session is visible when it is AirPlay Audio, which never opens a
+# video window.
+if( WIN32 )
+  list( APPEND RENDERER_SOURCES windows_tray.c )
+  # On-screen controls. macOS draws these inside its own videosink; the stock
+  # Windows sinks cannot, so they are composited into the frames with Cairo.
+  list( APPEND RENDERER_SOURCES windows_osd.c )
+  pkg_check_modules( CAIRO REQUIRED cairo )
+endif()
 if( APPLE )
   list( APPEND RENDERER_SOURCES macos_statusbar.m )
   # A patched copy of GStreamer's osxvideosink, registered statically into
@@ -68,6 +76,14 @@ add_library( renderers
              ${RENDERER_SOURCES} )
 
 target_link_libraries ( renderers PUBLIC airplay )
+
+if( WIN32 )
+  # Shell_NotifyIcon, the menu and window calls, and the GDI used to draw the
+  # icon rather than ship a resource file.
+  target_link_libraries ( renderers PUBLIC shell32 user32 gdi32 )
+  target_include_directories ( renderers PRIVATE ${CAIRO_INCLUDE_DIRS} )
+  target_link_libraries ( renderers PUBLIC ${CAIRO_LINK_LIBRARIES} )
+endif()
 
 if( APPLE )
   target_link_libraries ( renderers PUBLIC "-framework Cocoa" "-framework OpenGL" )

@@ -43,6 +43,13 @@ static unsigned char X11_search_attempts = 0;
 GST_PLUGIN_STATIC_DECLARE(uxvideo);
 #endif
 
+#ifdef _WIN32
+#include <windows.h>
+/* On-screen controls: the stock Windows sinks cannot draw them, so they are
+   composited into the frames instead. See renderers/windows_osd.h. */
+#include "windows_osd.h"
+#endif
+
 static GstClockTime gst_video_pipeline_base_time = GST_CLOCK_TIME_NONE;
 static logger_t *logger = NULL;
 static unsigned short width, height, width_source, height_source;  /* not currently used */
@@ -373,6 +380,18 @@ void video_renderer_init(logger_t *render_logger, const char *server_name, video
                     g_object_set(G_OBJECT (renderer_type[i]->pipeline), "video-sink", playbin_videosink, NULL);
                 }
             }
+#ifdef _WIN32
+            {
+                GstElement *osd = windows_osd_create_filter();
+
+                if (osd) {
+                    g_object_set(renderer_type[i]->pipeline, "video-filter", osd, NULL);
+                } else {
+                    logger_log(logger, LOGGER_INFO, "cairooverlay is missing:"
+                               " playing without on-screen controls");
+                }
+            }
+#endif
             /* The playlists are served from our own http server on localhost,
                but the media segments come from the internet. Left to measure
                the connection itself, the HLS demuxer times the localhost
@@ -434,6 +453,14 @@ void video_renderer_init(logger_t *render_logger, const char *server_name, video
                 if (jpeg_pipeline) {
                     g_string_append(launch, " imagefreeze allow-replace=TRUE ! textoverlay name=metadata_overlay ! ");
                 }
+#ifdef _WIN32
+                /* On-screen controls for mirroring. Not on the cover-art
+                   pipeline: it shows a still, has no timeline, and already
+                   carries an overlay of its own. */
+                if (!jpeg_pipeline) {
+                    g_string_append(launch, "videoconvert ! cairooverlay name=uxosd ! videoconvert ! ");
+                }
+#endif
                 g_string_append(launch, videosink);
                 g_string_append(launch, " name=");
                 g_string_append(launch, videosink);
@@ -475,6 +502,9 @@ void video_renderer_init(logger_t *render_logger, const char *server_name, video
                 g_clear_error (&error);
             }
             g_assert (renderer_type[i]->pipeline);
+#ifdef _WIN32
+            windows_osd_attach(renderer_type[i]->pipeline, "uxosd");
+#endif
             GstClock *clock = gst_system_clock_obtain();
             g_object_set(clock, "clock-type", GST_CLOCK_TYPE_REALTIME, NULL);
             gst_pipeline_use_clock(GST_PIPELINE_CAST(renderer_type[i]->pipeline), clock);
@@ -751,8 +781,69 @@ void video_renderer_hls_ready() {
     g_rec_mutex_unlock(&renderer_lock);
 }
 
+#ifdef _WIN32
+static GstElement *find_element_with_property(GstBin *bin, const char *name);
+static HWND current_video_window(void);
+
+/* Fullscreen. macOS has a richer model in its own view -- three fill modes,
+   with Enter cycling which axis is pinned -- but that rests on the sink drawing
+   the texture itself. Here the sink only offers its own fullscreen property, so
+   this is the plain on/off it supports. Nothing calls it except the user. */
+static void set_sink_fullscreen(gboolean on) {
+    GstElement *sink;
+
+    g_rec_mutex_lock(&renderer_lock);
+    if (renderer && renderer->pipeline) {
+        sink = find_element_with_property(GST_BIN(renderer->pipeline), "fullscreen");
+        if (sink) {
+            g_object_set(G_OBJECT(sink), "fullscreen", on, NULL);
+            gst_object_unref(sink);
+        }
+    }
+    g_rec_mutex_unlock(&renderer_lock);
+}
+
+/* macOS starts a session filling the screen -- uxplay-mac passes
+   start-fullscreen=true and showStream acts on it as a stream begins. Applied
+   once per session, so leaving fullscreen by hand sticks for the rest of it.
+   Nothing here runs during teardown: an earlier attempt reset the sink when the
+   session ended, and touching the pipeline at that point broke reconnection. */
+static gboolean fullscreen_on_connect = TRUE;
+static gboolean fullscreen_applied = FALSE;
+
+bool video_renderer_get_fullscreen_on_connect(void) {
+    return fullscreen_on_connect ? true : false;
+}
+
+void video_renderer_set_fullscreen_on_connect(bool enable) {
+    fullscreen_on_connect = enable ? TRUE : FALSE;
+}
+
+static void toggle_sink_fullscreen(void) {
+    GstElement *sink;
+    gboolean on = FALSE;
+
+    g_rec_mutex_lock(&renderer_lock);
+    if (renderer && renderer->pipeline) {
+        sink = find_element_with_property(GST_BIN(renderer->pipeline), "fullscreen");
+        if (sink) {
+            g_object_get(G_OBJECT(sink), "fullscreen", &on, NULL);
+            g_object_set(G_OBJECT(sink), "fullscreen", !on, NULL);
+            gst_object_unref(sink);
+        }
+    }
+    g_rec_mutex_unlock(&renderer_lock);
+}
+#endif
+
 void video_renderer_set_key_handler(void (*handler)(const char *key)) {
     key_handler = handler;
+#ifdef _WIN32
+    /* The composited controls report themselves through the same channel the
+       videosink's own key events use, so they share the handler. */
+    windows_osd_set_key_handler(handler);
+    windows_osd_set_fullscreen_handler(toggle_sink_fullscreen);
+#endif
 }
 
 /* Looking the sink up by GstVideoOverlay does not work inside playbin, which
@@ -833,23 +924,292 @@ void video_renderer_set_commanded_rate(float rate) {
     }
 }
 
+#ifdef _WIN32
+/* The Windows videosinks create their own top-level window in this process and
+   expose no property for which monitor it opens on, so the window is moved
+   instead of asking the sink to open it elsewhere. The same search finds the
+   window that has to be shown; see video_renderer_show_window(). */
+typedef struct {
+    HWND window;
+    DWORD pid;
+} video_window_search_t;
+
+static BOOL CALLBACK find_video_window(HWND window, LPARAM data) {
+    video_window_search_t *search = (video_window_search_t *) data;
+    DWORD pid = 0;
+    wchar_t class_name[64];
+
+    GetWindowThreadProcessId(window, &pid);
+    if (pid != search->pid) {
+        return TRUE;
+    }
+    /* Matched on the class rather than by ruling out the process's other
+       windows: the window this looks for may be invisible -- that is the whole
+       point of video_renderer_show_window() -- so "the visible top-level one"
+       is not a usable test. Every GStreamer Win32 videosink names its window
+       class with a "Gst" prefix (GstD3D12Hwnd, GstD3D11Hwnd, GstGL...), while
+       the console, the tray window and the IME windows do not. */
+    if (!GetClassNameW(window, class_name, ARRAYSIZE(class_name))) {
+        return TRUE;
+    }
+    if (wcsncmp(class_name, L"Gst", 3) != 0) {
+        return TRUE;
+    }
+    if (GetWindow(window, GW_OWNER) != NULL) {
+        return TRUE;   /* an owned helper window, not the video window itself */
+    }
+    search->window = window;
+    return FALSE;
+}
+
+typedef struct {
+    RECT rect[16];
+    int count;
+    int wanted;
+    RECT found;
+    bool ok;
+} monitor_search_t;
+
+static BOOL CALLBACK pick_monitor(HMONITOR monitor, HDC dc, LPRECT rect,
+                                  LPARAM data) {
+    monitor_search_t *search = (monitor_search_t *) data;
+    MONITORINFO info;
+
+    (void) dc;
+    (void) rect;
+    ZeroMemory(&info, sizeof(info));
+    info.cbSize = sizeof(info);
+    if (!GetMonitorInfo(monitor, &info)) {
+        return TRUE;
+    }
+    if (search->count == search->wanted) {
+        /* The work area, so a maximised-size window does not end up under the
+           taskbar. */
+        search->found = info.rcWork;
+        search->ok = true;
+    }
+    search->count++;
+    return TRUE;
+}
+
+/* Make the videosink's window visible.
+ *
+ * GStreamer's Direct3D sinks bring their window up with SW_SHOWDEFAULT, and
+ * SW_SHOWDEFAULT does not mean "show": it means "use the wShowWindow the
+ * process was created with". Anything that starts uxplay with STARTF_USESHOWWINDOW
+ * and SW_HIDE -- a service, a scheduled task, a shortcut set to run minimised,
+ * a launcher script -- therefore gets a video window that is created, sized to
+ * the stream, given frames, and never displayed. Only the audio is heard.
+ *
+ * macOS has the same split and settles it the same way: uxvideosink shows its
+ * window itself on the first caps of a stream (showStream in
+ * renderers/uxvideosink/osxvideosink.m), rather than trusting whatever state
+ * the window happened to be created in. The stock Windows sinks have no such
+ * hook, so uxplay does it for them.
+ */
+/* Keyboard input from the video window.
+ *
+ * The Windows videosinks report mouse activity as GstNavigation events but not
+ * keys -- verified against d3d12videosink, d3d11videosink and glimagesink, none
+ * of which posts anything for a key press. macOS has no such gap: uxvideosink
+ * owns its Cocoa view and handles keys there, which is where the arrow-key
+ * volume control and the fullscreen shortcut come from.
+ *
+ * So the window's own message handling is intercepted instead, and key presses
+ * are translated into the names GStreamer would have used, which is what the
+ * shared handler in uxplay.cpp already expects. */
+static WNDPROC video_window_prev_proc = NULL;
+static HWND video_window_subclassed = NULL;
+
+static const char *key_name_for_vk(WPARAM vk) {
+    switch (vk) {
+    case VK_UP:     return "Up";
+    case VK_DOWN:   return "Down";
+    case VK_LEFT:   return "Left";
+    case VK_RIGHT:  return "Right";
+    case VK_RETURN: return "Return";
+    case VK_ESCAPE: return "Escape";
+    case VK_SPACE:  return "space";
+    case VK_F11:    return "F11";
+    default:        return NULL;
+    }
+}
+
+static LRESULT CALLBACK video_window_proc(HWND window, UINT message,
+                                          WPARAM wparam, LPARAM lparam) {
+    WNDPROC prev = video_window_prev_proc;
+
+    if (message == WM_SETFOCUS) {
+        logger_log(logger, LOGGER_DEBUG, "video window took keyboard focus");
+    } else if (message == WM_KILLFOCUS) {
+        logger_log(logger, LOGGER_DEBUG, "video window lost keyboard focus");
+    } else if (message == WM_KEYDOWN || message == WM_SYSKEYDOWN) {
+        const char *key = key_name_for_vk(wparam);
+
+        logger_log(logger, LOGGER_DEBUG, "video window WM_KEYDOWN vk=0x%02X (%s)",
+                   (unsigned) wparam, key ? key : "unmapped");
+        /* Same order as the macOS view: the key goes to UxPlay first -- that is
+           where the arrow keys become volume changes -- and the window acts on
+           it afterwards. */
+        if (wparam == VK_RETURN) {
+            windows_osd_note_activity();
+            set_sink_fullscreen(TRUE);
+            return 0;
+        }
+        if (wparam == VK_ESCAPE) {
+            windows_osd_note_activity();
+            set_sink_fullscreen(FALSE);
+            return 0;
+        }
+        if (key) {
+            /* Same as moving the mouse: a key press is user activity and should
+               bring the controls up, which is what macOS does for the volume
+               keys through noteUserActivity. */
+            windows_osd_note_activity();
+            if (key_handler) {
+                key_handler(key);
+            }
+        }
+    } else if (message == WM_LBUTTONDOWN) {
+        /* The window is shown without being activated, so that a stream
+           starting does not yank the user out of whatever they were doing.
+           A click is them asking for it, and the keys are no use without it. */
+        SetFocus(window);
+    } else if (message == WM_LBUTTONDBLCLK) {
+        toggle_sink_fullscreen();
+    } else if (message == WM_DESTROY || message == WM_NCDESTROY) {
+        if (window == video_window_subclassed) {
+            SetWindowLongPtrW(window, GWLP_WNDPROC, (LONG_PTR) prev);
+            video_window_subclassed = NULL;
+            video_window_prev_proc = NULL;
+        }
+    }
+    return CallWindowProcW(prev, window, message, wparam, lparam);
+}
+
+static void subclass_video_window(HWND window) {
+    if (!window || window == video_window_subclassed) {
+        return;
+    }
+    video_window_prev_proc = (WNDPROC) SetWindowLongPtrW(window, GWLP_WNDPROC,
+                                                         (LONG_PTR) video_window_proc);
+    if (video_window_prev_proc) {
+        video_window_subclassed = window;
+        logger_log(logger, LOGGER_DEBUG, "listening for keys on the video window");
+    }
+}
+
+static HWND current_video_window(void) {
+    video_window_search_t search;
+
+    search.window = NULL;
+    search.pid = GetCurrentProcessId();
+    EnumWindows(find_video_window, (LPARAM) &search);
+    return search.window;
+}
+
+void video_renderer_show_window(void) {
+    video_window_search_t search;
+
+    search.window = NULL;
+    search.pid = GetCurrentProcessId();
+    EnumWindows(find_video_window, (LPARAM) &search);
+    if (!search.window) {
+        return;
+    }
+    subclass_video_window(search.window);
+    /* Once per session, at the point macOS calls showStream: a stream is really
+       running now, which is not the same thing as the window existing. */
+    if (fullscreen_on_connect && !fullscreen_applied) {
+        fullscreen_applied = TRUE;
+        set_sink_fullscreen(TRUE);
+    }
+    if (IsWindowVisible(search.window)) {
+        return;
+    }
+    /* SW_SHOWNA, not SW_SHOW: the video window should appear without stealing
+       focus from whatever the user is doing, which is how it behaves when the
+       sink shows it itself. */
+    ShowWindow(search.window, SW_SHOWNA);
+    logger_log(logger, LOGGER_DEBUG, "made the video window visible");
+}
+
+void video_renderer_set_display(int index) {
+    video_window_search_t search;
+    monitor_search_t monitors;
+    RECT window_rect;
+    int width_px, height_px, x, y;
+
+    if (index < 0) {
+        return;
+    }
+    ZeroMemory(&monitors, sizeof(monitors));
+    monitors.wanted = index;
+    EnumDisplayMonitors(NULL, NULL, pick_monitor, (LPARAM) &monitors);
+    if (!monitors.ok) {
+        return;
+    }
+
+    search.window = NULL;
+    search.pid = GetCurrentProcessId();
+    EnumWindows(find_video_window, (LPARAM) &search);
+    if (!search.window || !GetWindowRect(search.window, &window_rect)) {
+        return;
+    }
+
+    width_px = window_rect.right - window_rect.left;
+    height_px = window_rect.bottom - window_rect.top;
+    if (width_px > monitors.found.right - monitors.found.left) {
+        width_px = monitors.found.right - monitors.found.left;
+    }
+    if (height_px > monitors.found.bottom - monitors.found.top) {
+        height_px = monitors.found.bottom - monitors.found.top;
+    }
+    x = monitors.found.left +
+        ((monitors.found.right - monitors.found.left) - width_px) / 2;
+    y = monitors.found.top +
+        ((monitors.found.bottom - monitors.found.top) - height_px) / 2;
+
+    SetWindowPos(search.window, NULL, x, y, width_px, height_px,
+                 SWP_NOZORDER | SWP_NOACTIVATE);
+    logger_log(logger, LOGGER_INFO, "moved the video window to display %d", index + 1);
+}
+#else
 /* Which display the video window sits on. -1 leaves it where it is. */
 void video_renderer_set_display(int index) {
     video_renderer_set_sink_property("display-index", (gint) index, NULL);
 }
+#endif
 
+/* These three carry the state the on-screen controls are drawn from. On macOS
+   the controls live inside uxvideosink, so the state is pushed there as sink
+   properties; on Windows they are composited by windows_osd ahead of the sink,
+   which has no properties to set. Both are fed from the same call sites in
+   uxplay.cpp, which does not need to know the difference. */
 void video_renderer_set_stream_active(bool active) {
     video_renderer_set_sink_property("stream-active", (gboolean) active, NULL);
+#ifdef _WIN32
+    windows_osd_set_stream_active(active);
+    if (!active) {
+        fullscreen_applied = FALSE;   /* arm it for the next session */
+    }
+#endif
 }
 
 void video_renderer_show_volume(double level) {
     video_renderer_set_sink_property("volume-osd", level, NULL);
+#ifdef _WIN32
+    windows_osd_set_volume(level);
+#endif
 }
 
 void video_renderer_set_playback_info (double position, double duration, double rate) {
     video_renderer_set_sink_property("playback-position", position, NULL);
     video_renderer_set_sink_property("playback-duration", duration, NULL);
     video_renderer_set_sink_property("playback-rate", rate, NULL);
+#ifdef _WIN32
+    windows_osd_set_playback_info(position, duration, rate);
+#endif
 }
 
 bool video_renderer_take_window_closed() {
@@ -1217,6 +1577,19 @@ static gboolean gstreamer_video_pipeline_bus_callback(GstBus *bus, GstMessage *m
         }
         break;
     case GST_MESSAGE_STATE_CHANGED:
+#ifdef _WIN32
+        /* Whichever pipeline it is, once it plays there is a stream on screen
+           and the window has to be up. Cheap to repeat: the call returns at
+           once when the window is already visible. */
+        if (renderer && GST_MESSAGE_SRC(message) == GST_OBJECT(renderer->pipeline)) {
+            GstState pipeline_state;
+
+            gst_message_parse_state_changed(message, NULL, &pipeline_state, NULL);
+            if (pipeline_state == GST_STATE_PLAYING) {
+                video_renderer_show_window();
+            }
+        }
+#endif
         if (hls_video && strstr(GST_MESSAGE_SRC_NAME(message), "hls-playbin")) {
             GstState old_state, new_state;
             gst_message_parse_state_changed (message, &old_state, &new_state, NULL);
@@ -1296,11 +1669,22 @@ static gboolean gstreamer_video_pipeline_bus_callback(GstBus *bus, GstMessage *m
                             }
                         }
 #endif
+                        logger_log(logger, LOGGER_DEBUG, "video window key press: \"%s\"", key);
                         if (key_handler) {
                             key_handler (key);
                         }
                     }
                     break;
+#ifdef _WIN32
+                /* The composited controls have no window of their own, so the
+                   sink's mouse events are what reaches them. Anything the
+                   controls did not claim falls through unchanged. */
+                case GST_NAVIGATION_EVENT_MOUSE_MOVE:
+                case GST_NAVIGATION_EVENT_MOUSE_BUTTON_PRESS:
+                case GST_NAVIGATION_EVENT_MOUSE_BUTTON_RELEASE:
+                    windows_osd_handle_navigation(event);
+                    break;
+#endif
                 case GST_NAVIGATION_EVENT_KEY_RELEASE:
 #ifdef  X_DISPLAY_FIX
                     if (renderer->gst_window && renderer->gst_window->window &&

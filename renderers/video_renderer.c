@@ -1077,6 +1077,23 @@ static LRESULT CALLBACK video_window_proc(HWND window, UINT message,
         SetFocus(window);
     } else if (message == WM_LBUTTONDBLCLK) {
         toggle_sink_fullscreen();
+    } else if (message == WM_CLOSE) {
+        /* The title bar's X is the Windows counterpart of the close button the
+           macOS view draws over the video, and macOS does not let that button
+           tear the window down: it reports "uxplay-disconnect" and leaves
+           ending the session to UxPlay, which drops the client, rebuilds the
+           renderer and keeps advertising. Do the same here.
+
+           Letting DefWindowProc destroy the window instead is what left the
+           client stranded. The sink only discovers the window is gone at its
+           next show_frame (gstd3d12videosink.cpp:1696), so with playback
+           paused -- or between items -- that error never arrives, the main
+           loop never quits, and the session hangs on with no window to render
+           into. Nothing could reconnect until UxPlay was restarted. */
+        if (key_handler) {
+            key_handler("uxplay-disconnect");
+            return 0;
+        }
     } else if (message == WM_DESTROY || message == WM_NCDESTROY) {
         if (window == video_window_subclassed) {
             SetWindowLongPtrW(window, GWLP_WNDPROC, (LONG_PTR) prev);
@@ -1585,6 +1602,21 @@ static gboolean gstreamer_video_pipeline_bus_callback(GstBus *bus, GstMessage *m
             GstState pipeline_state;
 
             gst_message_parse_state_changed(message, NULL, &pipeline_state, NULL);
+            /* Take the window over as soon as the sink has made one, not when
+               a frame finally plays. The close button, and every key, live in
+               that window procedure: hooking it only at PLAYING meant a
+               session that never got there -- one still prerolling, or stuck
+               on a variant that never delivers a frame -- kept the sink's own
+               procedure, where the title bar's X quietly destroys the window
+               and tells UxPlay nothing. The session then hung with no window,
+               and the client could not come back.
+
+               Only worth a look while we have no window: EnumWindows on every
+               state change is not free, and subclass_video_window() ignores a
+               window it already owns. */
+            if (!video_window_subclassed) {
+                subclass_video_window(current_video_window());
+            }
             if (pipeline_state == GST_STATE_PLAYING) {
                 video_renderer_show_window();
             }

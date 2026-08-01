@@ -859,6 +859,23 @@ http_handler_play(raop_conn_t *conn, http_request_t *request, http_response_t *r
     int id = -1;
     id = get_playlist_by_uuid(raop, playback_uuid);
 
+    /* A stored entry is only worth reusing if the playlist actually arrived.
+       The uuid is recorded as soon as the entry is made, before the request for
+       the master playlist goes out over the reverse channel, so a session torn
+       down in between -- measured: the request sent, TEARDOWN a moment later,
+       the client never answering -- leaves an entry that matches by uuid and
+       holds nothing. Every later /play for that video then reused it, skipped
+       the fetch, and left the local HLS server answering 404 for the rest of
+       the process's life: the video would not start again until UxPlay was
+       restarted. Throw such an entry away and fetch it properly. */
+    if (id >= 0 && !get_master_playlist(raop->airplay_video[id])) {
+        logger_log(raop->logger, LOGGER_INFO,
+                   "stored playlist %s never received its master playlist; fetching it again",
+                   playback_uuid);
+        raop_destroy_airplay_video(raop, id);
+        id = -1;
+    }
+
     /* check if playlist is already downloaded and stored (may have been interrupted by advertisements ) */
     if (id >= 0) {
       //printf("====use EXISTING  airplay_video[%d] %p %s %s\n", id, raop->airplay_video[id], playback_uuid, get_playback_uuid(raop->airplay_video[id]));

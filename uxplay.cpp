@@ -3564,13 +3564,13 @@ int main (int argc, char *argv[]) {
     statusbar_set_disconnect_handler(statusbar_disconnect_requested);
     statusbar_set_seek_handler(statusbar_seek_requested);
     statusbar_set_display_handler(statusbar_display_requested);
+    statusbar_set_fullscreen_on_connect_hooks(video_renderer_get_fullscreen_on_connect,
+                                              video_renderer_set_fullscreen_on_connect);
 #ifdef _WIN32
     statusbar_set_quit_handler(statusbar_quit_requested);
     /* The tray is the interface; the console window only earns its place when
        there is a debug log going into it. */
     statusbar_setup_console(debug_log);
-    statusbar_set_fullscreen_on_connect_hooks(video_renderer_get_fullscreen_on_connect,
-                                              video_renderer_set_fullscreen_on_connect);
 #endif
     if (use_video) {
         video_renderer_set_key_handler(video_window_key_pressed);

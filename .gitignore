@@ -12,3 +12,6 @@ Makefile
 
 # left behind by "make install"
 install_manifest.txt
+
+# Windows distribution folder and archive, assembled by hand (see HANDOFF-windows.md)
+dist/

@@ -739,6 +739,10 @@ static gboolean video_eos_watch_callback (gpointer loop) {
    videosink on every platform, so it lives outside the status-item guard. */
 static double last_playback_position = 0.0;
 
+/* Zero while mirroring, which has no timeline: the transport glyphs are left
+   off the panel for the same reason, and the arrow keys stay off it too. */
+static double last_playback_duration = 0.0;
+
 /* Which display the video window sits on. Remembered so a window built for the
    next session opens where the last one was put. */
 static int selected_display_index = -1;
@@ -831,6 +835,18 @@ static void video_window_key_pressed(const char *key) {
         } else {
             video_renderer_pause();
             video_renderer_set_commanded_rate(0.0f);
+        }
+        return;
+    }
+    /* Left and right are the ◀◀ and ▶▶ glyphs reached from the keyboard: the
+       same ten seconds, through the same path, so the two cannot drift apart.
+       Only where there is a timeline to move along -- mirroring reports no
+       duration, and the panel leaves the transport row off for that reason.
+       Up and down stay with the volume below. */
+    if (!strcmp(key, "Left") || !strcmp(key, "Right")) {
+        if (use_video && last_playback_duration > 0.0) {
+            video_window_key_pressed(!strcmp(key, "Left") ? "uxplay-skip:-10"
+                                                          : "uxplay-skip:10");
         }
         return;
     }
@@ -2481,6 +2497,7 @@ extern "C" void conn_destroy (void *cls) {
             video_renderer_set_stream_active(false);
             video_renderer_set_playback_info(0.0, 0.0, 0.0);
             last_playback_position = 0.0;
+            last_playback_duration = 0.0;
         }
         statusbar_set_progress(0.0, 0.0);
         remote_clock_offset = 0;
@@ -2949,6 +2966,7 @@ extern "C" void on_video_acquire_playback_info (void *cls, playback_info_t *play
 #endif
     if (use_video) {
         last_playback_position = playback_info->position;
+        last_playback_duration = playback_info->duration;
         video_renderer_set_playback_info(playback_info->position, playback_info->duration,
                                          playback_info->rate);
     }

@@ -41,6 +41,11 @@ void windows_osd_attach(GstElement *pipeline, const char *element_name);
    videosink's key events go to. */
 void windows_osd_set_key_handler(void (*handler)(const char *key));
 
+/* Called when the close button drawn over the video is clicked. Set this to
+   something that ends the session without going back through the pipeline --
+   the button exists for sessions that are not playing. */
+void windows_osd_set_close_handler(void (*handler)(void));
+
 /* 0.0 - 1.0. Also counts as user activity, so changing the volume brings the
    controls up exactly as moving the mouse does -- the macOS behaviour. */
 void windows_osd_set_volume(double fraction);

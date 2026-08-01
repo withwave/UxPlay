@@ -70,6 +70,7 @@ static double drag_offset_x = 0.0;
 static double drag_offset_y = 0.0;
 
 static void (*key_handler)(const char *key) = NULL;
+static void (*close_handler)(void) = NULL;
 static void (*fullscreen_handler)(void) = NULL;
 
 /* ------------------------------------------------------------------ */
@@ -570,6 +571,10 @@ void windows_osd_set_key_handler(void (*handler)(const char *key)) {
     key_handler = handler;
 }
 
+void windows_osd_set_close_handler(void (*handler)(void)) {
+    close_handler = handler;
+}
+
 void windows_osd_set_fullscreen_handler(void (*handler)(void)) {
     fullscreen_handler = handler;
 }
@@ -769,7 +774,19 @@ bool windows_osd_handle_navigation(GstEvent *event) {
             if (point_in(&close, x, y)) {
                 g_mutex_unlock(&osd_lock);
                 windows_osd_note_activity();
-                send_control_key("uxplay-disconnect");
+                /* Go out through the window, the way the title bar's X does.
+                   That path is a WM_CLOSE handled in the window procedure on
+                   the window's own thread, and it ends the session whatever
+                   the pipeline is doing. Reporting "uxplay-disconnect" here
+                   instead put the close on the same road the click came in
+                   on -- sink, navigation event, pipeline bus, main loop --
+                   so the one button meant for a stuck session needed a
+                   working one to be pressed at all. */
+                if (close_handler) {
+                    close_handler();
+                } else {
+                    send_control_key("uxplay-disconnect");
+                }
                 return true;
             }
             consumed = begin_interaction(x, y, &pending_key, &want_fullscreen);

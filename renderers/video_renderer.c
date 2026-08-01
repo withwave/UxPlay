@@ -91,7 +91,7 @@ typedef enum {
   //GST_PLAY_FLAG_VIS           = (1 << 3),
   //GST_PLAY_FLAG_SOFT_VOLUME   = (1 << 4),
   //GST_PLAY_FLAG_NATIVE_AUDIO  = (1 << 5),
-  //GST_PLAY_FLAG_NATIVE_VIDEO  = (1 << 6),
+  GST_PLAY_FLAG_NATIVE_VIDEO  = (1 << 6),
   GST_PLAY_FLAG_DOWNLOAD      = (1 << 7),
   GST_PLAY_FLAG_BUFFERING     = (1 << 8),
   //GST_PLAY_FLAG_DEINTERLACE   = (1 << 9),
@@ -382,7 +382,19 @@ void video_renderer_init(logger_t *render_logger, const char *server_name, video
             }
 #ifdef _WIN32
             {
-                GstElement *osd = windows_osd_create_filter();
+                /* macOS draws the controls inside its own sink, so nothing is
+                   inserted in playbin's video path there -- and closing the
+                   window and coming back has always worked. Windows has no
+                   patched sink, so the controls arrive as a video-filter,
+                   which is the one structural difference between the two, and
+                   it sits exactly where the frames go missing: a rebuilt
+                   pipeline's d3d12 decoder has to renegotiate its GPU memory
+                   down to system memory through this bin, and the second time
+                   round nothing reaches the sink and no error is posted.
+
+                   UXPLAY_NO_OSD leaves it out, which is the macOS shape. */
+                GstElement *osd = g_getenv("UXPLAY_NO_OSD") ? NULL
+                                                            : windows_osd_create_filter();
 
                 if (osd) {
                     g_object_set(renderer_type[i]->pipeline, "video-filter", osd, NULL);
@@ -413,6 +425,23 @@ void video_renderer_init(logger_t *render_logger, const char *server_name, video
                Only this pipeline is affected: mirroring builds its own and
                keeps hardware decoding. */
             flags |= GST_PLAY_FLAG_FORCE_SW_DECODERS;
+#ifdef _WIN32
+            /* Keep playsink from wrapping our controls in converters of its
+               own. The overlay goes in as a video-filter -- macOS has no such
+               element, its sink draws the controls itself -- and playsink
+               answers a filter by building conv and scale around it. Linking
+               those sends reconfigure upstream, and on a rebuilt pipeline it
+               lands while the hardware decoder is negotiating: measured, the
+               decoder starts a second negotiation and never finishes it, so
+               not one frame reaches the sink, no error is posted, and the
+               session sits there until UxPlay is restarted. The filter bin
+               carries videoconvert on both sides already, so nothing playsink
+               would have added is missing.
+
+               Only this pipeline, and only Windows: mirroring builds its own
+               and does not go through playsink at all. */
+            flags |= GST_PLAY_FLAG_NATIVE_VIDEO;
+#endif
             g_object_set(renderer_type[i]->pipeline, "flags", flags, NULL);
             //g_object_set (G_OBJECT (renderer_type[i]->pipeline), "uri", uri, NULL);
         } else {
@@ -836,6 +865,25 @@ static void toggle_sink_fullscreen(void) {
 }
 #endif
 
+#ifdef _WIN32
+/* The close button drawn over the video, sent out through the window rather
+   than back down the pipeline. The click arrives as a navigation event on the
+   bus, so answering it with another pipeline round trip makes the one control
+   meant for a session in trouble depend on that session being healthy. A
+   WM_CLOSE lands in video_window_proc on the window's own thread, which is
+   the path the title bar's X already takes and which works whatever the
+   pipeline is doing. */
+static void osd_close_requested(void) {
+    HWND window = current_video_window();
+
+    if (window) {
+        PostMessageW(window, WM_CLOSE, 0, 0);
+    } else if (key_handler) {
+        key_handler("uxplay-disconnect");
+    }
+}
+#endif
+
 void video_renderer_set_key_handler(void (*handler)(const char *key)) {
     key_handler = handler;
 #ifdef _WIN32
@@ -843,6 +891,7 @@ void video_renderer_set_key_handler(void (*handler)(const char *key)) {
        videosink's own key events use, so they share the handler. */
     windows_osd_set_key_handler(handler);
     windows_osd_set_fullscreen_handler(toggle_sink_fullscreen);
+    windows_osd_set_close_handler(osd_close_requested);
 #endif
 }
 

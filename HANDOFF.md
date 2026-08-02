@@ -20,7 +20,38 @@ uxplay -hls -vs "uxvideosink force-aspect-ratio=true start-fullscreen=true \
 ```
 
 - 로그를 파이프로 넘기면 `script`가 `tcgetattr/ioctl` 오류로 죽는다. 리다이렉트 없이 실행하고 출력 파일을 따로 읽을 것.
-- 테스트 전 `pkill -9 -f uxplay`로 이전 인스턴스를 반드시 정리한다. 인스턴스가 둘 이상이면 로그와 동작이 뒤섞여 판단이 전부 어긋난다.
+- 테스트 전 이전 인스턴스를 반드시 정리한다. 인스턴스가 둘 이상이면 로그와 동작이 뒤섞여 판단이 전부 어긋난다.
+
+### 로그인 시 자동 실행 (LaunchAgent)
+
+`com.uxplay.airplay.plist`가 템플릿이다 (systemd의 `uxplay.service`에 해당). `make install`이
+docdir의 `launchd/`에 함께 깐다. **launchd는 `~`를 확장하지 않으므로** 로그 경로 두 곳을 실제
+홈 디렉터리로 바꾼 뒤 설치할 것.
+
+```sh
+cp com.uxplay.airplay.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.uxplay.airplay.plist
+```
+
+- `LaunchDaemon`이 아니라 **`LaunchAgent`**여야 한다. 메뉴바 아이템과 영상 창은 GUI 세션이 필요하고
+  데몬에는 둘 다 없다
+- **`KeepAlive`를 넣지 않았다.** 메뉴바의 Quit이 Quit이어야 하는데 `KeepAlive`가 있으면 launchd가
+  즉시 되살린다
+- 실행 대상은 바이너리가 아니라 래퍼다. 래퍼가 자기 옆의 `uxplay`를 찾으므로 launchd의 빈약한
+  PATH에 의존하지 않는다
+- **로그 파일이 비어 있는 것은 정상이다** — TTY가 아니면 출력이 블록 버퍼링된다. 실제로 보려면
+  `ProgramArguments`에 `-d`를 한 줄 더한다
+
+**개발 중 함정.** 자동 실행이 걸린 뒤로는 빌드한 것을 테스트할 때 인스턴스가 둘이 된다. 반드시:
+
+```sh
+launchctl bootout gui/$(id -u)/com.uxplay.airplay     # 먼저 내리고
+cd ~/AI/UxPlay && ./uxplay-mac -d 1                   # 빌드 트리 것으로 테스트
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.uxplay.airplay.plist
+```
+
+상태 확인은 `launchctl print gui/$(id -u)/com.uxplay.airplay`. 부모 pid가 1이고 이 명령이 보고하는
+pid와 일치하면 launchd가 띄운 것이다.
 
 ## 이 브랜치가 더한 것
 

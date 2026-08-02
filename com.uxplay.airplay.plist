@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Start UxPlay at login on macOS. The systemd equivalent is uxplay.service.
+
+  Install:
+      cp com.uxplay.airplay.plist ~/Library/LaunchAgents/
+      # launchd does not expand ~, so put your own home directory in the two
+      # log paths below first.
+      launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.uxplay.airplay.plist
+
+  Remove:
+      launchctl bootout gui/$(id -u)/com.uxplay.airplay
+      rm ~/Library/LaunchAgents/com.uxplay.airplay.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.uxplay.airplay</string>
+
+    <!-- The wrapper, not the binary: it carries the videosink options this
+         build needs. It finds uxplay beside itself, so nothing here depends on
+         PATH. Add <string>-d</string> below for a debug log. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/uxplay-mac</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Deliberately no KeepAlive. Quit in the menu bar has to mean quit;
+         with KeepAlive launchd would put it straight back. -->
+
+    <!-- launchd starts agents with a bare PATH. Homebrew's prefix is added so
+         GStreamer's tools are reachable if anything shells out. Use
+         /opt/homebrew/bin instead on Apple Silicon. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+
+    <!-- Replace with your own home directory: launchd does not expand ~. -->
+    <key>StandardOutPath</key>
+    <string>/Users/CHANGEME/Library/Logs/uxplay.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/CHANGEME/Library/Logs/uxplay.log</string>
+
+    <!-- The menu bar item and the video window need the GUI session, which is
+         what a LaunchAgent runs in. A LaunchDaemon would have neither. -->
+    <key>ProcessType</key>
+    <string>Interactive</string>
+</dict>
+</plist>

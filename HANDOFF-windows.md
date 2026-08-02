@@ -42,7 +42,7 @@ Windows는 위 인자를 직접 넘긴다. `make install`도 Windows용 설치 �
 - **SmartScreen** ("Windows의 PC 보호" 파란 창) — `추가 정보` → `실행`으로 지나간다. 압축 풀기 전에 zip을 `Unblock-File`로 풀어 두면 안의 파일에 표식이 남지 않아 아예 뜨지 않는다.
 - **Smart App Control** (Windows 11) — **앱별 예외가 없다.** 차단 해제도, 자체 서명도 통과하지 못한다. 서명된 앱이거나 마이크로소프트가 평판을 인정한 앱만 실행된다. 실기 확인: Win11 PC에서 이것에 막혔고, 기능을 끄자 실행됐다.
 
-SAC는 **한 번 끄면 Windows를 재설치하기 전에는 다시 켤 수 없다.** 상태는 `HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy`의 `VerifiedAndReputablePolicyState`로 본다 (`1` 켜짐, `2` 평가, `0` 꺼짐). Win11을 새로 설치한 PC에서만 기본으로 켜지므로, 업그레이드한 PC에서 시험하면 이 문제를 못 본다 — 개발 PC에서 멀쩡하던 것이 남의 PC에서 안 되는 이유가 이것이다.
+끄는 것은 Windows 보안 앱에서 하고, **최신 업데이트가 적용된 Windows 11이면 같은 자리에서 다시 켤 수 있다.** "한 번 끄면 재설치 전에는 못 켠다"는 것은 이전 동작이며 업데이트되지 않은 빌드에만 해당한다. 다만 마이크로소프트는 **선택적 진단 데이터를 꺼 둔 경우**에는 SAC를 켜려면 PC를 초기화하거나 Windows를 재설치하고 설치 중 진단 데이터 전송을 선택해야 한다고 명시한다. 상태는 `HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy`의 `VerifiedAndReputablePolicyState`로 본다 (`1` 켜짐, `2` 평가, `0` 꺼짐). 이 값을 직접 `1`이나 `2`로 되돌려 살렸다는 보고가 마이크로소프트 Q&A에 있으나 공식 지원 경로는 아니다. Win11을 새로 설치한 PC에서만 기본으로 켜지므로, 업그레이드한 PC에서 시험하면 이 문제를 못 본다 — 개발 PC에서 멀쩡하던 것이 남의 PC에서 안 되는 이유가 이것이다.
 
 끄게 하지 않으려면 정식 코드서명 인증서로 서명하는 수밖에 없다. EV는 SmartScreen 평판을 즉시 얻고 SAC도 통과하지만 하드웨어 토큰과 연 비용이 든다. OV는 싸지만 평판을 쌓는 데 시간이 걸리고 SAC 통과가 보장되지 않는다. `signtool`은 Windows SDK와 함께 이 PC에 이미 있다.
 

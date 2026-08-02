@@ -32,6 +32,9 @@ static NSMenuItem *display_item = nil;
 static NSMenuItem *fullscreen_item = nil;
 static bool (*fullscreen_on_connect_get)(void) = NULL;
 static void (*fullscreen_on_connect_set)(bool enable) = NULL;
+static NSMenuItem *handover_item = nil;
+static bool (*hls_handover_get)(void) = NULL;
+static void (*hls_handover_set)(bool enable) = NULL;
 static void (*display_handler)(int index) = NULL;
 static NSInteger selected_display = -1;
 
@@ -72,6 +75,7 @@ static void rebuild_display_menu (id target);
 - (void) progressChanged: (id) sender;
 - (void) displayChosen: (id) sender;
 - (void) fullscreenOnConnectToggled: (id) sender;
+- (void) hlsHandoverToggled: (id) sender;
 - (void) menuWillOpen: (NSMenu *) menu;
 @end
 
@@ -100,6 +104,13 @@ static void rebuild_display_menu (id target);
 {
     if (fullscreen_on_connect_get && fullscreen_on_connect_set) {
         fullscreen_on_connect_set (!fullscreen_on_connect_get ());
+    }
+}
+
+- (void) hlsHandoverToggled: (id) sender
+{
+    if (hls_handover_get && hls_handover_set) {
+        hls_handover_set (!hls_handover_get ());
     }
 }
 
@@ -318,6 +329,17 @@ rebuild_display_menu (id target)
         [item setState: (selected_display == (NSInteger) i) ? NSControlStateValueOn
                                                             : NSControlStateValueOff];
     }
+    if (hls_handover_get) {
+        [handover_item setState: (hls_handover_get () ? NSControlStateValueOn
+                                                     : NSControlStateValueOff)];
+        [handover_item setHidden: NO];
+        /* Re-advertising takes the service down and puts it back, which a
+           connected client can lose, so this is only offered when nobody is
+           attached. */
+        [handover_item setEnabled: (current_state == STATUSBAR_IDLE)];
+    } else {
+        [handover_item setHidden: YES];
+    }
     if (fullscreen_on_connect_get) {
         [fullscreen_item setState: (fullscreen_on_connect_get () ? NSControlStateValueOn
                                                                 : NSControlStateValueOff)];
@@ -418,6 +440,12 @@ statusbar_init (void)
         }
 
         [menu addItem: [NSMenuItem separatorItem]];
+
+        handover_item = [menu addItemWithTitle: @"Switch to HLS video"
+                                       action: @selector(hlsHandoverToggled:)
+                                keyEquivalent: @""];
+        [handover_item setTarget: target];
+        [handover_item setHidden: YES];
 
         fullscreen_item = [menu addItemWithTitle: @"Fullscreen on connect"
                                           action: @selector(fullscreenOnConnectToggled:)
@@ -584,6 +612,13 @@ statusbar_set_fullscreen_on_connect_hooks (bool (*get)(void), void (*set)(bool e
 {
     fullscreen_on_connect_get = get;
     fullscreen_on_connect_set = set;
+}
+
+void
+statusbar_set_hls_handover_hooks (bool (*get)(void), void (*set)(bool enable))
+{
+    hls_handover_get = get;
+    hls_handover_set = set;
 }
 
 void

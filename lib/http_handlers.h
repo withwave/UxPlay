@@ -68,8 +68,20 @@ http_handler_server_info(raop_conn_t *conn, http_request_t *request, http_respon
      * 5. slideshow supported
      * 6. (unknown)
      * 9. audio supported.
+     *
+     * The two video bits follow what is actually advertised, so a receiver with
+     * video handover turned off does not claim it here and contradict its own
+     * mDNS record. The rest stays as written: this is the legacy response and
+     * it wants these twelve bits. Answering it with the full 64-bit feature set
+     * instead -- which is what GET /info sends -- stops the client dead: it
+     * asked for /server-info eight times over and never reached /play, looping
+     * through pair-setup and fp-setup instead.
      */
-    plist_t features_node = plist_new_uint(0x27F); 
+    uint64_t server_info_features = 0x27F;
+    if (!(dnssd_get_airplay_features(raop->dnssd) & ((uint64_t) 1 << 4))) {
+        server_info_features &= ~(uint64_t) 0x11;   /* bits 0 and 4 */
+    }
+    plist_t features_node = plist_new_uint(server_info_features); 
     plist_dict_set_item(r_node, "features", features_node);
 
     plist_t mac_address_node = plist_new_string(hw_addr);

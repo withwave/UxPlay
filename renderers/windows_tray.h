@@ -94,6 +94,11 @@ void statusbar_setup_console(bool debug_log);
 void statusbar_set_fullscreen_on_connect_hooks(bool (*get)(void),
                                                void (*set)(bool enable));
 
+/* Whether the client is told this receiver plays video itself. Off keeps a
+   mirrored screen mirrored instead of handing playback over. */
+void statusbar_set_hls_handover_hooks(bool (*get)(void),
+                                      void (*set)(bool enable));
+
 void statusbar_destroy(void);
 
 #ifdef __cplusplus

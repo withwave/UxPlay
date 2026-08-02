@@ -5,13 +5,18 @@
 
 macOS 쪽 내용은 `HANDOFF.md`에 있다. 이 문서는 Windows에서만 해당되는 것만 적는다.
 
-## 빌드와 실행
+## 빌드·설치·실행
 
 ```sh
 # MSYS2 UCRT64 툴체인이 PATH에 있어야 한다
+cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 build/uxplay.exe -n UxPlay-Tray -hls -nohold -d
 ```
+
+**맥의 `uxplay-mac` 같은 래퍼가 Windows에는 없다.** 그쪽은 videosink 옵션을 래퍼가 싣지만
+Windows는 위 인자를 직접 넘긴다. `make install`도 Windows용 설치 규칙이 없다 — 배포는 아래
+"배포본 만들기"의 자립형 폴더로 한다. 래퍼가 필요하면 `UxPlay.bat`이 그 자리를 겸한다.
 
 - **포트는 실행할 때마다 바뀐다.** 클라이언트는 mDNS로 찾으므로 문제가 없지만, 사람이 `netstat`이나 직접 접속으로 확인할 때는 매번 다시 봐야 한다. 이전 실행의 포트로 찔러보고 "연결 거부"를 서버 이상으로 읽는 실수를 하기 쉽다.
 - 콘솔 창은 `-d`가 있을 때만 나온다. 트레이가 인터페이스이고, 디버그 로그가 갈 곳이 있을 때만 콘솔이 제 몫을 한다.

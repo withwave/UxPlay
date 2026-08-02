@@ -94,6 +94,10 @@ install( FILES uxplay.1 DESTINATION ${CMAKE_INSTALL_MANDIR}/man1 )
 install( FILES README.md README.txt README.html LICENSE DESTINATION ${CMAKE_INSTALL_DOCDIR} ) 
 install( FILES lib/llhttp/LICENSE-MIT DESTINATION ${CMAKE_INSTALL_DOCDIR}/llhttp )
 install( FILES uxplay.service DESTINATION ${CMAKE_INSTALL_DOCDIR}/systemd ) 
+if ( APPLE )
+  # Start-at-login template; see the comment inside it for what to substitute.
+  install( FILES com.uxplay.airplay.plist DESTINATION ${CMAKE_INSTALL_DOCDIR}/launchd )
+endif()
 install( FILES Bluetooth_LE_beacon/uxplay-beacon.1 DESTINATION ${CMAKE_INSTALL_MANDIR}/man1 )
 install( FILES Bluetooth_LE_beacon/uxplay-beacon.py
          DESTINATION bin

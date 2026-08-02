@@ -40,6 +40,7 @@
 #define IDM_QUIT           101
 #define IDM_CONSOLE        102
 #define IDM_FULLSCREEN     103
+#define IDM_HLS_HANDOVER   104
 #define IDM_VOLUME_BASE    200   /* + 0..10, tenths */
 #define IDM_SEEK_ABS_BASE  300   /* + 0..9, tenths of the duration */
 #define IDM_SEEK_REL_BASE  320   /* + 0..3, see seek_offsets[] */
@@ -73,6 +74,8 @@ static void (*display_handler)(int index) = NULL;
 static void (*quit_handler)(void) = NULL;
 static bool (*fullscreen_on_connect_get)(void) = NULL;
 static void (*fullscreen_on_connect_set)(bool enable) = NULL;
+static bool (*hls_handover_get)(void) = NULL;
+static void (*hls_handover_set)(bool enable) = NULL;
 
 static HWND tray_window = NULL;
 static HANDLE tray_thread = NULL;
@@ -516,6 +519,11 @@ static void show_menu(void) {
                     (fullscreen_on_connect_get() ? MF_CHECKED : MF_UNCHECKED),
                     IDM_FULLSCREEN, L"Fullscreen on connect");
     }
+    if (hls_handover_get) {
+        AppendMenuW(menu, MF_STRING |
+                    (hls_handover_get() ? MF_CHECKED : MF_UNCHECKED),
+                    IDM_HLS_HANDOVER, L"Switch to HLS video");
+    }
     if (own_the_console()) {
         HWND console = GetConsoleWindow();
 
@@ -552,6 +560,10 @@ static void show_menu(void) {
     } else if (chosen == IDM_FULLSCREEN) {
         if (fullscreen_on_connect_get && fullscreen_on_connect_set) {
             fullscreen_on_connect_set(!fullscreen_on_connect_get());
+        }
+    } else if (chosen == IDM_HLS_HANDOVER) {
+        if (hls_handover_get && hls_handover_set) {
+            hls_handover_set(!hls_handover_get());
         }
     } else if (chosen >= IDM_VOLUME_BASE && chosen <= IDM_VOLUME_BASE + 10) {
         double fraction = (chosen - IDM_VOLUME_BASE) / 10.0;
@@ -790,6 +802,12 @@ void statusbar_set_display_handler(void (*handler)(int index)) {
 
 void statusbar_set_quit_handler(void (*handler)(void)) {
     quit_handler = handler;
+}
+
+void statusbar_set_hls_handover_hooks(bool (*get)(void),
+                                      void (*set)(bool enable)) {
+    hls_handover_get = get;
+    hls_handover_set = set;
 }
 
 void statusbar_set_fullscreen_on_connect_hooks(bool (*get)(void),

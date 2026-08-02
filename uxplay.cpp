@@ -881,6 +881,42 @@ static void statusbar_seek_requested(double position) {
     }
 }
 
+/* Whether the client is told this receiver can play video itself. With the two
+   bits on, an iPhone that is mirroring hands over a URL for anything it can
+   stream and we play it natively -- better picture, and the phone can sleep.
+   With them off it never offers, and the video stays inside the mirrored
+   screen. Measured: with them cleared the client did not even ask, sending no
+   /server-info and no /play, so it is the advertisement that decides this and
+   not our own gate on the requests.
+
+   Changing it means re-advertising, since the features go into the TXT record
+   when the service is registered and nothing updates them in place. */
+static bool hls_handover_get(void) {
+    return hls_support;
+}
+
+static void hls_handover_set(bool enable) {
+    if (enable == hls_support) {
+        return;
+    }
+    hls_support = enable;
+    /* Keep our own gate in step with what we advertise, even though the client
+       stops asking before it reaches it. */
+    if (raop) {
+        raop_set_plist(raop, "hls", enable ? 1 : 0);
+    }
+    dnssd_set_airplay_features(dnssd, 0, (int) hls_support);
+    dnssd_set_airplay_features(dnssd, 4, (int) hls_support);
+    dnssd_unregister_airplay(dnssd);
+    if (dnssd_register_airplay(dnssd, airplay_port)) {
+        LOGE("could not re-advertise AirPlay after changing video handover");
+        return;
+    }
+    LOGI("video handover %s: advertising features 0x%llX",
+         hls_support ? "on" : "off",
+         (unsigned long long) dnssd_get_airplay_features(dnssd));
+}
+
 static void statusbar_display_requested(int index) {
     selected_display_index = index;
     if (use_video) {
@@ -3566,6 +3602,7 @@ int main (int argc, char *argv[]) {
     statusbar_set_display_handler(statusbar_display_requested);
     statusbar_set_fullscreen_on_connect_hooks(video_renderer_get_fullscreen_on_connect,
                                               video_renderer_set_fullscreen_on_connect);
+    statusbar_set_hls_handover_hooks(hls_handover_get, hls_handover_set);
 #ifdef _WIN32
     statusbar_set_quit_handler(statusbar_quit_requested);
     /* The tray is the interface; the console window only earns its place when

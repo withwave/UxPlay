@@ -55,6 +55,11 @@ void statusbar_set_display_handler(void (*handler)(int index));
 void statusbar_set_fullscreen_on_connect_hooks(bool (*get)(void),
                                                void (*set)(bool enable));
 
+/* Whether the client is told this receiver plays video itself. Off keeps a
+   mirrored screen mirrored instead of handing playback over. */
+void statusbar_set_hls_handover_hooks(bool (*get)(void),
+                                      void (*set)(bool enable));
+
 /* Invoked when "Disconnect" is chosen. Expected to end the session and leave
    the server advertising. */
 void statusbar_set_disconnect_handler(void (*handler)(void));

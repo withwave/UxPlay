@@ -3,12 +3,24 @@
 브랜치: `macos-airplay-ux` (fork: `origin`)
 대상: macOS 15.7 / Intel / GStreamer 1.28.5 (Homebrew) / 논-Retina 2560×1440
 
-## 빌드와 실행
+## 빌드·설치·실행
 
 ```sh
+cmake -DCMAKE_BUILD_TYPE=Release .      # 처음 한 번, 또는 CMakeLists.txt를 고친 뒤
 make -j$(sysctl -n hw.ncpu)
-./uxplay-mac -d 1
+./uxplay-mac -d 1                       # 빌드 트리에서 바로 실행
 ```
+
+설치는 `/usr/local`로 간다. **`/usr/local/bin`에 쓰기 권한이 있으면 sudo가 필요 없다** (이 머신이
+그렇다). `uxplay`, `uxplay-mac`, man 페이지, 그리고 `share/doc/uxplay/launchd/`의 LaunchAgent
+템플릿이 함께 깔린다.
+
+```sh
+make install
+uxplay-mac                              # 설치본은 어디서든
+```
+
+**빌드 후에는 반드시 다시 띄울 것.** 빌드 전에 인스턴스를 내려놓고 재실행을 잊는 실수가 잦다.
 
 `uxplay-mac`이 아래 옵션을 싣는 래퍼다. 빌드 트리에서 실행하면 옆의 `./uxplay`를, 아니면 PATH의
 것을 쓴다. 인자는 그대로 전달되고, `-vs`를 직접 주면 아래 싱크 줄을 대체한다. `make install`이

@@ -85,6 +85,11 @@ static gint selected_display;
 static void video_renderer_set_sink_property(const char *name, ...);
 static void apply_sink_preferences(GstElement *sink, const char *what);
 #endif
+#ifdef _WIN32
+/* Defined with the fullscreen-on-connect accessors further down; declared here
+   because video_renderer_init has to arm it for the session it is building. */
+static gboolean fullscreen_applied;
+#endif
 static gboolean hls_playing = FALSE;
 static gboolean hls_buffer_empty = FALSE;
 static gboolean hls_buffer_full = FALSE;
@@ -323,6 +328,19 @@ void video_renderer_init(logger_t *render_logger, const char *server_name, video
     hls_video = (uri != NULL);
     hls_last_known_position = -1.0;   /* per session, never carried over */
     hls_commanded_rate = 1.0f;
+#ifdef _WIN32
+    /* A renderer being built is a stream about to start, which is the whole of
+       what "on connect" means -- so arm it here rather than leaving it to the
+       teardown of the session before. That teardown is a client callback, and
+       it does not always come: closing the video window ends the session from
+       our side, and a client that vanishes never sends one at all. Whenever it
+       was missed the flag stayed set and the next stream came up windowed with
+       the menu still ticked, which is what made it look intermittent.
+
+       macOS lands in the same place from the other direction: its sink is
+       rebuilt per session and reads start-fullscreen as the stream begins. */
+    fullscreen_applied = FALSE;
+#endif
 #ifdef __APPLE__
     static bool uxvideo_registered = false;
     if (!uxvideo_registered) {

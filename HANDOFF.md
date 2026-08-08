@@ -292,6 +292,29 @@ clientProcName  : com.apple.WebKit.GPU
 사파리 라이브 스트림은 `duration`이 `GST_CLOCK_TIME_NONE`이다 — 정상이다. 그래서 스크러버와
 시크가 없다.
 
+**라이브에서 GLib이 초당 한 번 경고를 쏟던 문제 (해결).** 두 단계였다:
+
+- `gst_element_query_duration`은 라이브에서도 **성공을 반환하고** 값으로 "없음"을 준다. 반환값만
+  보고 통과시키면 `GST_CLOCK_TIME_NONE`(−1 나노초)을 나눠 `-0.000000`초가 되고, 싱크의
+  `playback-duration`은 범위가 0부터라 이를 거부한다. 질의 성공 뒤 값의 유효성을 **다시** 볼 것
+- 그걸 고치자 조기 반환 경로를 타면서 초기값 `-1.0`이 `playback-position`으로 밀려가 같은 경고가
+  났다. `video_renderer_set_playback_info()`에서 세 값 모두 음수를 0으로 낮춘다 — 0은 패널이 이미
+  "그릴 것 없음"으로 읽는 값이다
+
+### 미해결: 소스를 바꾸면 사파리가 물러난다
+
+사파리에서 재생 소스를 바꾸면 `/play` 뒤 약 900~1000줄만에 `/stop`이 오고, 네 번째쯤 아예
+포기한다. 전환하지 않으면 계속 재생된다.
+
+우리 쪽 에러는 없다 — 끊는 것은 클라이언트다 (`client closed connection`, `POST /stop`). 왜
+물러나는지는 우리 로그에 남지 않는다. 미확증 후보:
+
+- 라이브라 `playback_info not available`이 초당 한 번 나간다. 다만 전환 없이도 나가므로 단독
+  원인은 아니다
+- `on_video_play`가 `raop_announce_seek()`로 `paused`를 보낸다 (2026-08-02 추가). 소스가 바뀔
+  때마다 나간다 — **오늘 넣은 것이니 먼저 의심할 것**
+- 전환 시 파이프라인을 통째로 재생성한다
+
 ### 미해결: 영상이 끝났다는 것을 클라이언트에 알릴 방법
 
 EOS 시 `video_eos_watch_callback`은 `commanded_rate`를 0으로 두고 세션만 유지하며, **클라이언트에게

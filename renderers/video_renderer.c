@@ -1356,6 +1356,13 @@ void video_renderer_show_volume(double level) {
 }
 
 void video_renderer_set_playback_info (double position, double duration, double rate) {
+    /* "Unknown" arrives here as a negative, and these properties start at zero,
+       so GLib refused every one of them -- once a second for as long as a live
+       stream ran, first the duration and then the position. Zero is what the
+       panel already reads as nothing to draw. */
+    position = position > 0.0 ? position : 0.0;
+    duration = duration > 0.0 ? duration : 0.0;
+    rate = rate > 0.0 ? rate : 0.0;
     video_renderer_set_sink_property("playback-position", position, NULL);
     video_renderer_set_sink_property("playback-duration", duration, NULL);
     video_renderer_set_sink_property("playback-rate", rate, NULL);
@@ -2037,7 +2044,16 @@ static bool video_get_playback_info_locked(double *duration, double *position, d
     }
 
     if (!GST_CLOCK_TIME_IS_VALID(hls_duration)) {
-        if (!gst_element_query_duration (renderer->pipeline, GST_FORMAT_TIME, &hls_duration)) {
+        /* A live stream answers this query, and answers it with "no duration".
+           Taking the reply as a number turns GST_CLOCK_TIME_NONE into -1
+           nanosecond, and -0.000000 seconds is out of range for the sink's
+           playback-duration property -- GLib rejected it once a second for as
+           long as Safari's live stream ran. Nothing is a length of zero, which
+           is what the client and the on-screen panel already read as "no
+           timeline". */
+        if (!gst_element_query_duration (renderer->pipeline, GST_FORMAT_TIME, &hls_duration) ||
+            !GST_CLOCK_TIME_IS_VALID(hls_duration)) {
+            hls_duration = GST_CLOCK_TIME_NONE;
             return true;
         }
     }

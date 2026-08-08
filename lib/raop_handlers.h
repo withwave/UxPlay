@@ -254,6 +254,21 @@ raop_handler_pairpinstart(raop_conn_t *conn,
                           char **response_data, int *response_datalen) {
     raop_t *raop = conn->raop;
     logger_log(raop->logger, LOGGER_INFO, "client sent PAIR-PIN-START request");
+    /* Only when a pin was actually asked for. Answering this unconditionally
+       contradicted the mDNS record, which says pw=false and clears the "pin
+       required" status bit -- and a Mac client takes that at its word: it never
+       prompts, so it never sends the pin back, and the pairing it started can
+       never finish. Measured: eight pins issued to a MacBook, not one
+       pair-setup-pin in reply, and with the pairing stuck the video channel was
+       never opened at all -- Safari fell back to an audio-only session and
+       showed the video as playing on the device itself. Refusing here leaves
+       the client free to pair the way an open receiver expects. */
+    if (!raop->use_pin) {
+        logger_log(raop->logger, LOGGER_INFO,
+                   "declining PIN pairing: no pin is configured (use option -pin)");
+        http_response_init(response, "RTSP/1.0", 403, "Forbidden");
+        return;
+    }
     int pin_4 = 0;
     if (raop->pin > 9999) {
         pin_4 = raop->pin % 10000;

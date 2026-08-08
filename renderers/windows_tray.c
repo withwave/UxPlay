@@ -74,6 +74,7 @@ static void (*display_handler)(int index) = NULL;
 static void (*quit_handler)(void) = NULL;
 static bool (*fullscreen_on_connect_get)(void) = NULL;
 static void (*fullscreen_on_connect_set)(bool enable) = NULL;
+static int pairing_pin = 0;
 static bool (*hls_handover_get)(void) = NULL;
 static void (*hls_handover_set)(bool enable) = NULL;
 
@@ -519,6 +520,12 @@ static void show_menu(void) {
                     (fullscreen_on_connect_get() ? MF_CHECKED : MF_UNCHECKED),
                     IDM_FULLSCREEN, L"Fullscreen on connect");
     }
+    if (pairing_pin > 0) {
+        wchar_t label[32];
+
+        _snwprintf(label, 32, L"AirPlay PIN: %04d", pairing_pin);
+        AppendMenuW(menu, MF_STRING | MF_DISABLED, 0, label);
+    }
     if (hls_handover_get) {
         AppendMenuW(menu, MF_STRING |
                     (hls_handover_get() ? MF_CHECKED : MF_UNCHECKED),
@@ -802,6 +809,31 @@ void statusbar_set_display_handler(void (*handler)(int index)) {
 
 void statusbar_set_quit_handler(void (*handler)(void)) {
     quit_handler = handler;
+}
+
+void statusbar_set_pin(int pin) {
+    pairing_pin = pin;
+}
+
+/* A balloon rather than a window: the tray is the interface here, and a dialog
+   would take focus from whatever the user is doing. */
+void statusbar_show_pin_dialog(int pin) {
+    NOTIFYICONDATAW data;
+
+    if (pin <= 0 || !tray_window) {
+        return;
+    }
+    memset(&data, 0, sizeof(data));
+    data.cbSize = sizeof(data);
+    data.hWnd = tray_window;
+    data.uID = 1;
+    data.uFlags = NIF_INFO;
+    data.dwInfoFlags = NIIF_INFO;
+    _snwprintf(data.szInfoTitle, sizeof(data.szInfoTitle) / sizeof(wchar_t),
+               L"UxPlay");
+    _snwprintf(data.szInfo, sizeof(data.szInfo) / sizeof(wchar_t),
+               L"Enter this PIN on the client: %04d", pin);
+    Shell_NotifyIconW(NIM_MODIFY, &data);
 }
 
 void statusbar_set_hls_handover_hooks(bool (*get)(void),

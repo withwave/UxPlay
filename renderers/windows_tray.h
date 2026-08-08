@@ -99,6 +99,10 @@ void statusbar_set_fullscreen_on_connect_hooks(bool (*get)(void),
 void statusbar_set_hls_handover_hooks(bool (*get)(void),
                                       void (*set)(bool enable));
 
+/* The pairing pin, shown for as long as one is in force. 0 hides it. */
+void statusbar_set_pin(int pin);
+void statusbar_show_pin_dialog(int pin);
+
 void statusbar_destroy(void);
 
 #ifdef __cplusplus

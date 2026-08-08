@@ -993,7 +993,33 @@ http_handler_play(raop_conn_t *conn, http_request_t *request, http_response_t *r
     }
     set_start_position_seconds(airplay_video, (float) start_position_seconds);
 
-    /* we only support HLS if the playback location is terminated by "/master.m3u8" */
+    /* A location the media player can fetch for itself needs none of the
+       machinery below. The YouTube app hands over an mlhls:// url, which names
+       nothing reachable: it means "ask me for it", so the playlists come back
+       over the reverse channel and are served from our own HTTP server, with
+       every uri rewritten to point at it. Safari hands over an ordinary http
+       url served by the phone itself --
+       http://192.168.0.232:8772/session/.../hls/restored.m3u8 -- and there is
+       nothing to ask for or rewrite. It used to be refused with 400 for not
+       ending in /master.m3u8, which is a YouTube convention and not an HLS one;
+       the video simply never started and the screen stayed black. */
+    if (!strncmp(playback_location, "http://", 7) ||
+        !strncmp(playback_location, "https://", 8)) {
+        logger_log(raop->logger, LOGGER_INFO, "playing the client's url directly:\n%s", playback_location);
+        set_playback_location(airplay_video, playback_location, strlen(playback_location));
+        raop->callbacks.on_video_play(raop->callbacks.cls,
+                                      get_playback_location(airplay_video),
+                                      get_start_position_seconds(airplay_video));
+        plist_mem_free(playback_location);
+        if (req_root_node) {
+            plist_free(req_root_node);
+        }
+        return;
+    }
+
+    /* Everything from here is the ask-me-for-it form, which this code only
+       knows how to follow when the master playlist is named the way the
+       YouTube app names it. */
     const char *uri_suffix = strstr(playback_location, "/master.m3u8");
     if (!uri_suffix) { 
         logger_log(raop->logger, LOGGER_ERR, "Content-Location has unsupported form:\n%s\n", playback_location);	    

@@ -30,6 +30,7 @@
 #include <fstream>
 #include <sstream>
 #include <iterator>
+#include <random>
 #include <sys/stat.h>
 #include <cstdio>
 #include <stdarg.h>
@@ -2470,6 +2471,9 @@ extern "C" int video_set_codec(void *cls, video_codec_t codec) {
 }
 
 extern "C" void display_pin(void *cls, char *pin) {
+    /* On screen as well as in the log: the log is where nobody is looking when
+       a client is sitting there asking for a pin. */
+    statusbar_show_pin_dialog(atoi(pin));
     int margin = 10;
     int spacing = 3;
     char *image = create_pin_display(pin, margin, spacing);
@@ -3111,7 +3115,20 @@ static int start_raop_server (unsigned short display[5], unsigned short tcp[3], 
 
     if (show_client_FPS_data) raop_set_plist(raop, "clientFPSdata", 1);
     if (audiodelay >= 0) raop_set_plist(raop, "audio_delay_micros", audiodelay);
-    if (pin_pw == 1) raop_set_plist(raop, "pin", (int) pin);
+    if (pin_pw == 1) {
+        /* Settled once, here, rather than made fresh for each pairing request.
+           A Mac decides whether to ask for a pin from the mDNS record and
+           prompts before it connects at all, so a pin invented when the request
+           arrives is invented after the moment it was needed -- measured: the
+           client showed its prompt and sent us nothing whatever. Fixing it for
+           the run lets the tray carry it, which is where the user reads it. */
+        if (pin < 10000) {
+            std::random_device rd;
+            pin = (unsigned short) ((rd() % 10000) + 10000);
+        }
+        raop_set_plist(raop, "pin", (int) pin);
+        statusbar_set_pin((int) (pin % 10000));
+    }
     if (hls_support) raop_set_plist(raop, "hls", 1);
 
     /* network port selection (ports listed as "0" will be dynamically assigned) */

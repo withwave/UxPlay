@@ -40,6 +40,18 @@ VIDEOSINK='uxvideosink force-aspect-ratio=true start-fullscreen=true hide-until-
 # walk up to and use is the behaviour you want anyway.
 HANDOVER='-nohold'
 
+# A Mac client will not hand video over until it has paired, and it only pairs
+# through a pin -- but it decides whether to ask for one from the mDNS record
+# before it connects, so with pw=false it never prompts, never sends a pin
+# back, and the pairing it started can never finish. Safari then falls back to
+# an audio-only session and shows the video as playing on the device itself.
+# Advertising a pin makes it prompt, and pairing completes.
+#
+# No number: one is drawn at startup and shown in the menu bar for the life of
+# the run, which is where it can be read. Pass your own -pin nnnn after the
+# script's arguments to fix it instead.
+PIN='-pin'
+
 # Find the binary: prefer one sitting next to this script (a build tree),
 # otherwise whatever is on PATH.
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -55,8 +67,8 @@ fi
 # Let the caller pick the sink instead, if they want to.
 for arg in "$@"; do
     if [ "$arg" = "-vs" ]; then
-        exec "$UXPLAY" -hls $HANDOVER "$@"
+        exec "$UXPLAY" -hls $HANDOVER $PIN "$@"
     fi
 done
 
-exec "$UXPLAY" -hls $HANDOVER -vs "$VIDEOSINK" "$@"
+exec "$UXPLAY" -hls $HANDOVER $PIN -vs "$VIDEOSINK" "$@"

@@ -33,6 +33,9 @@ static NSMenuItem *fullscreen_item = nil;
 static bool (*fullscreen_on_connect_get)(void) = NULL;
 static void (*fullscreen_on_connect_set)(bool enable) = NULL;
 static NSMenuItem *handover_item = nil;
+static int pairing_pin = 0;
+static NSWindow *pin_panel = nil;
+static NSTimer *pin_panel_timer = nil;
 static bool (*hls_handover_get)(void) = NULL;
 static void (*hls_handover_set)(bool enable) = NULL;
 static void (*display_handler)(int index) = NULL;
@@ -200,6 +203,14 @@ refresh (void)
         state_text = @"Waiting for a client";
         symbol = @"airplayvideo";
         break;
+    }
+
+    /* The pin belongs on the state line: it is what the user needs while they
+       are looking at the menu wondering what to do, and a client asks for it
+       before it connects, so it has to be readable with nothing going on. */
+    if (pairing_pin > 0) {
+        state_text = [NSString stringWithFormat: @"%@  \U000000B7  PIN %04d",
+                                                 state_text, pairing_pin];
     }
 
     NSImage *image = nil;
@@ -619,6 +630,74 @@ statusbar_set_hls_handover_hooks (bool (*get)(void), void (*set)(bool enable))
 {
     hls_handover_get = get;
     hls_handover_set = set;
+}
+
+/* A panel of our own rather than NSAlert: runModal would hold the main thread,
+   and the video view draws on it -- the picture would stop until the alert was
+   dismissed. This one is ordered front and goes away on a timer, so nothing
+   waits for it. */
+void
+statusbar_show_pin_dialog (int pin)
+{
+    if (pin <= 0) {
+        return;
+    }
+    run_on_main (^{
+        NSRect frame = NSMakeRect (0, 0, 340, 150);
+        NSTextField *label;
+
+        if (pin_panel == nil) {
+            pin_panel = [[NSPanel alloc]
+                initWithContentRect: frame
+                          styleMask: (NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
+                                      NSWindowStyleMaskUtilityWindow)
+                            backing: NSBackingStoreBuffered
+                              defer: NO];
+            [pin_panel setTitle: @"UxPlay"];
+            [pin_panel setLevel: NSFloatingWindowLevel];
+            [pin_panel setReleasedWhenClosed: NO];
+            [pin_panel setHidesOnDeactivate: NO];
+
+            label = [[NSTextField alloc] initWithFrame: NSMakeRect (20, 20, 300, 110)];
+            [label setBezeled: NO];
+            [label setDrawsBackground: NO];
+            [label setEditable: NO];
+            [label setSelectable: YES];
+            [label setAlignment: NSTextAlignmentCenter];
+            [label setTag: 1];
+            [[pin_panel contentView] addSubview: label];
+            [label release];
+        }
+        label = [[pin_panel contentView] viewWithTag: 1];
+        [label setAttributedStringValue:
+            [[[NSAttributedString alloc]
+                initWithString: [NSString stringWithFormat: @"Enter this PIN on the client\n\n%04d", pin]
+                    attributes: @{ NSFontAttributeName:
+                                       [NSFont monospacedDigitSystemFontOfSize: 28
+                                                                        weight: NSFontWeightSemibold],
+                                   NSForegroundColorAttributeName: [NSColor labelColor] }]
+             autorelease]];
+        [pin_panel center];
+        [pin_panel orderFrontRegardless];
+
+        /* Long enough to type, short enough not to be left lying about. */
+        [pin_panel_timer invalidate];
+        pin_panel_timer = [NSTimer scheduledTimerWithTimeInterval: 60.0
+                                                          repeats: NO
+                                                            block: ^(NSTimer *t) {
+            [pin_panel orderOut: nil];
+            pin_panel_timer = nil;
+        }];
+    });
+}
+
+void
+statusbar_set_pin (int pin)
+{
+    pairing_pin = pin;
+    run_on_main (^{
+        refresh ();
+    });
 }
 
 void

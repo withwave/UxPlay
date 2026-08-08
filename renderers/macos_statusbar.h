@@ -60,6 +60,16 @@ void statusbar_set_fullscreen_on_connect_hooks(bool (*get)(void),
 void statusbar_set_hls_handover_hooks(bool (*get)(void),
                                       void (*set)(bool enable));
 
+/* The pairing pin, shown for as long as one is in force. A Mac asks for it
+   before it connects, so it has to be readable here without a client having
+   done anything first. 0 hides the row. */
+void statusbar_set_pin(int pin);
+
+/* Put the pin on screen for a moment, when a client actually asks to pair.
+   The menu bar carries it the whole time; this is for the case where the user
+   is looking at the client, not at the menu bar. */
+void statusbar_show_pin_dialog(int pin);
+
 /* Invoked when "Disconnect" is chosen. Expected to end the session and leave
    the server advertising. */
 void statusbar_set_disconnect_handler(void (*handler)(void));

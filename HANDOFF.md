@@ -248,6 +248,50 @@ replay하는 코드가 없었다. 재생 중이 아닐 때 고른 모니터는 �
 `sink->display_index`는 `-1`로 초기화해야 한다. `g_object_new`의 0으로 시작하면 `>= 0` 검사에
 "모니터 1번"으로 읽혀 모든 창을 거기로 옮긴다.
 
+### 사파리 영상이 재생되지 않던 문제 (해결)
+
+증상: 맥북 사파리에서 영상의 AirPlay 버튼을 눌러도 화면이 검고, 사파리는 "이 기기에서 재생"으로
+표시. 아이폰 유튜브는 정상. 두 층이 겹쳐 있었다.
+
+**① 페어링에서 막혀 영상 채널에 도달조차 못 했다.** 맥 클라이언트는 페어링을 마쳐야 영상을
+넘기는데, 그 페어링은 pin을 거친다. 그런데 맥은 **접속하기 전에** mDNS 레코드만 보고 물어볼지
+정한다. `pw=false`로 광고하면 묻지 않고 곧장 `pair-pin-start`를 보내고, 우리는 그때 pin을 만들어
+**터미널에** 뿌렸다 — 맥 사용자가 볼 수 없는 곳이다. 측정: pin 8회 발급, `pair-setup-pin` 0회,
+`HTTP/1.1` 요청 0회. 남은 것은 RTSP 오디오 세션뿐이었다.
+
+- `-pin`을 상시 사용한다 (`uxplay-mac`). 숫자를 주지 않으면 **시작할 때 한 번** 뽑아 프로세스
+  수명 동안 고정한다. 요청이 올 때마다 난수를 만드는 기본 동작은 맥에는 무용하다 — 그 요청은
+  사용자가 pin을 입력한 뒤에야 오므로 영영 만들어지지 않는다
+- pin을 메뉴바 상태 줄에 상시 표시하고(`Waiting for a client · PIN 3939`), 페어링 요청이 오면
+  화면에 패널도 띄운다. **`NSAlert`를 쓰지 말 것** — `runModal`이 메인 스레드를 잡고 영상 뷰가
+  그 스레드에서 그린다. 별도 `NSPanel`을 띄우고 타이머로 닫는다
+- `raop_handler_pairpinstart`가 `use_pin`을 확인하도록 했다. pin이 설정되지 않았는데 발급하면
+  우리가 광고한 `pw=false`와 모순된다. (거절하면 맥은 `pair-verify`로 넘어가지만 그쪽도
+  `use_pin`이 아니면 빈 200을 돌려주고 끝나므로, 이것만으로는 부족하다 — 그래서 `-pin` 상시)
+
+**② 영상이 넘어와도 우리가 400으로 거절했다.**
+
+```
+Content-Location: http://192.168.0.232:8772/session/.../hls/restored.m3u8?generation=1&native=1
+clientProcName  : com.apple.WebKit.GPU
+*** ERROR: Content-Location has unsupported form  →  HTTP/1.1 400 Bad Request
+```
+
+두 방식이 근본적으로 다르다:
+
+| | 유튜브 앱 | 사파리 |
+|---|---|---|
+| Content-Location | `mlhls://localhost/master.m3u8` | 실제 http url (아이폰이 띄운 서버) |
+| 뜻 | "나에게 요청해라" | 그냥 가져가라 |
+| 데이터 | 리버스 채널(FCUP) → 우리 로컬 HLS 서버가 중계 | 직접 가져오면 끝 |
+
+기존 코드는 `mlhls://` 방식만 상정해 모든 url을 로컬 서버 주소로 갈아치웠고, `/master.m3u8`로
+끝나야 한다는 검사가 있었다. **그건 유튜브의 작명 관례이지 HLS 규격이 아니다.** 이제
+`http(s)://`로 시작하면 url을 그대로 playbin에 넘긴다. `mlhls://` 경로는 그대로 두었다.
+
+사파리 라이브 스트림은 `duration`이 `GST_CLOCK_TIME_NONE`이다 — 정상이다. 그래서 스크러버와
+시크가 없다.
+
 ### 미해결: 영상이 끝났다는 것을 클라이언트에 알릴 방법
 
 EOS 시 `video_eos_watch_callback`은 `commanded_rate`를 0으로 두고 세션만 유지하며, **클라이언트에게
